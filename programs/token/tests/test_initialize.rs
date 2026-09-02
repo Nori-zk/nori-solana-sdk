@@ -1,5 +1,6 @@
 
 use {
+    alloy_primitives::{Address, B256},
     anchor_lang::{
         prelude::Pubkey,
         solana_program::{instruction::Instruction, system_program},
@@ -11,6 +12,7 @@ use {
     solana_message::{Message, VersionedMessage},
     solana_signer::Signer,
     solana_transaction::versioned::VersionedTransaction,
+    token::state::NoriSolTokenBridgeInit,
 };
 
 #[test]
@@ -35,9 +37,19 @@ fn test_initialize() {
     svm.add_program(program_id, bytes).unwrap();
     svm.airdrop(&payer.pubkey(), 1_000_000_000).unwrap();
 
+    let init_values = NoriSolTokenBridgeInit {
+        verified_state_root: B256::from([1u8; 32]),
+        nori_bridge_vk: B256::from([2u8; 32]),
+        latest_helios_store_input_hash: B256::from([3u8; 32]),
+        eth_token_bridge_address: Address::from([4u8; 20]),
+    };
+
     let instruction = Instruction::new_with_bytes(
         program_id,
-        &token::instruction::Initialize {}.data(),
+        &token::instruction::Initialize {
+            init_values: init_values.clone(),
+        }
+        .data(),
         token::accounts::Initialize {
             payer: payer.pubkey(),
             token,
@@ -69,4 +81,21 @@ fn test_initialize() {
     let mut data: &[u8] = &state_account.data;
     let state_state = token::state::NoriSolTokenBridge::try_deserialize(&mut data).unwrap();
     assert_eq!(state_state.authority, payer.pubkey());
+    assert_eq!(state_state.latest_head, 0);
+    assert_eq!(
+        state_state.verified_state_root,
+        <[u8; 32]>::from(init_values.verified_state_root)
+    );
+    assert_eq!(
+        state_state.nori_bridge_vk,
+        <[u8; 32]>::from(init_values.nori_bridge_vk)
+    );
+    assert_eq!(
+        state_state.latest_helios_store_input_hash,
+        <[u8; 32]>::from(init_values.latest_helios_store_input_hash)
+    );
+    assert_eq!(
+        state_state.eth_token_bridge_address,
+        <[u8; 20]>::from(init_values.eth_token_bridge_address)
+    );
 }

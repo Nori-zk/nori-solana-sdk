@@ -31,10 +31,8 @@ pub struct Initialize<'info> {
     pub token_program: Interface<'info, TokenInterface>,
 }
 
-pub fn handle_initialize(ctx: Context<Initialize>) -> Result<()> {
-    // Initalize state
-    ctx.accounts.state.authority = ctx.accounts.payer.key();
-    
+pub fn handle_initialize(ctx: Context<Initialize>, init_values: NoriSolTokenBridgeInit) -> Result<()> {
+    ctx.accounts.state.set_inner((init_values, ctx.accounts.payer.key()).into());
     // also todo
     //ctx.accounts.token.supply;
     //ctx.accounts.token.mint_authority;
@@ -50,6 +48,8 @@ pub fn handle_initialize(ctx: Context<Initialize>) -> Result<()> {
 
     msg!("Hello, world! Counter initialized");
     */
+
+    msg!("NoriSolTokenBridge initialized");
 
     Ok(())
 }
