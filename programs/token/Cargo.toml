@@ -25,6 +25,10 @@ alloy-primitives = { version = "1.7.1", features = ["borsh"] }
 anchor-lang = "1.1.2"
 hex = "0.4"
 anchor-spl = "1.1.2"
+solana-ed25519-program = "3.0.0"
+solana-instructions-sysvar = "3.0.1"
+solana-sdk-ids = "3.1.0"
+solana-sha256-hasher = "3.1.0"
 sp1-solana = { git = "https://github.com/Nori-zk/sp1-solana", branch = "feat/sp1-v6-groth16-master-typed" }
 nori-sp1-helios-primitives = { git = "https://github.com/Nori-zk/nori-bridge-head", branch = "SCRAP/request-queue-2-clean-integrated" }
 

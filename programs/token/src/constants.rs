@@ -15,4 +15,11 @@ pub const TOKEN_MAX_MAGNITUDE: u64 = ((1u128 << 64) - 1) as u64;
 #[constant]
 pub const TOKEN_WEI_PER_BRIDGE_UNIT: u64 = 10u64.pow(18 - (TOKEN_DECIMALS as u32));
 
-// Calculate max supply TOKEN_MAX_MAGNITUDE is what we can store inside
+#[constant]
+pub const MAX_PROOF_USAGE_WINDOW: usize = 96;
+
+#[constant]
+pub const PROOF_REQUEST_ROOT_ENTRY_SIZE: usize = 56;
+
+#[constant]
+pub const WINDOW_BUFFER_SIZE: usize = MAX_PROOF_USAGE_WINDOW * PROOF_REQUEST_ROOT_ENTRY_SIZE;

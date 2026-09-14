@@ -22,14 +22,17 @@ pub enum UpdateError {
     ZeroSyncCommitteeHash,
 }
 
+#[event]
+pub struct UpdateApplied {
+    pub output_slot: u64,
+    pub queue_cursor: u64,
+    pub verified_state_root: [u8; 32],
+    pub window_index: u8,
+}
+
 #[derive(Accounts)]
 pub struct Update<'info> {
-    #[account(mut)]
-    pub payer: Signer<'info>,
     #[account(
-        init,
-        payer = payer,
-        space = 8 + NoriSolTokenBridge::INIT_SPACE,
         seeds = [NORI_SOL_TOKEN_BRIDGE_STATE_SEED],
         bump
     )]
@@ -39,6 +42,28 @@ pub struct Update<'info> {
 use nori_sp1_helios_primitives::types::ProofOutputs;
 use sp1_solana::{verify_proof, SP1Groth16Proof};
 
+/// Advances the bridge's verified Ethereum light-client state by one proof batch.
+///
+/// This is the bridge's permissionless state-transition entrypoint: anyone may
+/// call it, and the only credential that matters is a valid SP1 Groth16 proof
+/// for the batch. The stored vkey anchors which proving program is trusted;
+/// the signer is irrelevant.
+///
+/// Each accepted call moves `latest_head`, the execution state root, the
+/// store-hash chain, and the proof-request queue cursor forward together,
+/// atomically. Beyond proof validity, the checks enforce that the batch is a
+/// strict continuation of the bridge's current state — it must resume from the
+/// settled queue cursor, chain from the latest verified head and store hash,
+/// and make forward progress — so no caller can skip, replay, or fork history.
+///
+/// On success, the batch's deposit root is recorded in the rolling window that
+/// minting later reads from, and an [`UpdateApplied`] event is emitted.
+///
+/// # Errors
+///
+/// Returns an [`UpdateError`] if proof verification or decoding fails, or if
+/// any value the proof commits to breaks continuity with the bridge's current
+/// state.
 pub fn handle_update(ctx: Context<Update>, proof: SP1Groth16Proof) -> Result<()> {
     // Hex encode the vkey_hash
     ctx.accounts.state.nori_bridge_vk;
@@ -134,7 +159,22 @@ pub fn handle_update(ctx: Context<Update>, proof: SP1Groth16Proof) -> Result<()>
 
     ctx.accounts.state.apply_update(&proof_outputs);
 
-    // TODO need to consider what to do for windowing
+    // ================================================================
+    // Emit success event / message
+    // ================================================================
 
+    emit!(UpdateApplied {
+        output_slot: proof_outputs.output_slot,
+        queue_cursor: proof_outputs.output_queue_cursor,
+        verified_state_root: ctx.accounts.state.verified_state_root,
+        window_index: ctx.accounts.state.window_index,
+    });
+
+    msg!(
+        "Update applied: slot {}, cursor {}, window {}",
+        proof_outputs.output_slot,
+        ctx.accounts.state.queue_cursor,
+        ctx.accounts.state.window_index
+    );
     Ok(())
 }
