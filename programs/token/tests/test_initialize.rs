@@ -41,7 +41,8 @@ fn test_initialize() {
         verified_state_root: B256::from([1u8; 32]),
         nori_bridge_vk: B256::from([2u8; 32]),
         latest_helios_store_input_hash: B256::from([3u8; 32]),
-        eth_token_bridge_address: Address::from([4u8; 20]),
+        eth_proof_queue_address: Address::from([4u8; 20]),
+        queue_cursor: 0,
     };
 
     let instruction = Instruction::new_with_bytes(
@@ -95,7 +96,7 @@ fn test_initialize() {
         <[u8; 32]>::from(init_values.latest_helios_store_input_hash)
     );
     assert_eq!(
-        state_state.eth_token_bridge_address,
-        <[u8; 20]>::from(init_values.eth_token_bridge_address)
+        state_state.eth_proof_queue_address,
+        <[u8; 20]>::from(init_values.eth_proof_queue_address)
     );
 }
