@@ -20,6 +20,7 @@ pub struct NoriSolTokenBridge {
     pub nori_bridge_vk: [u8; 32],
     pub latest_helios_store_input_hash: [u8; 32],
     pub eth_proof_queue_address: [u8; 20],
+    pub eth_token_bridge_address: [u8; 20],
     pub queue_cursor: u64,
     pub window_index: u8,
     pub window_buffer: [ProofRequestRootEntry; MAX_PROOF_USAGE_WINDOW],
@@ -31,6 +32,7 @@ pub struct NoriSolTokenBridgeInit {
     pub nori_bridge_vk: B256,
     pub latest_helios_store_input_hash: B256,
     pub eth_proof_queue_address: Address,
+    pub eth_token_bridge_address: Address,
     pub queue_cursor: u64,
 }
 
@@ -43,6 +45,7 @@ impl From<(NoriSolTokenBridgeInit, Pubkey)> for NoriSolTokenBridge {
             nori_bridge_vk: init.nori_bridge_vk.into(),
             latest_helios_store_input_hash: init.latest_helios_store_input_hash.into(),
             eth_proof_queue_address: init.eth_proof_queue_address.into(),
+            eth_token_bridge_address: init.eth_token_bridge_address.into(),
             queue_cursor: init.queue_cursor,
             window_index: 0u8,
             window_buffer: [ProofRequestRootEntry::default(); MAX_PROOF_USAGE_WINDOW],
@@ -70,4 +73,10 @@ impl NoriSolTokenBridge {
         // Advance for the next update, wrapping at the end
         self.window_index = ((self.window_index as usize + 1) % MAX_PROOF_USAGE_WINDOW) as u8;
     }
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct NoriSolTokenAccountStorage {
+    pub minted_so_far: u64,
 }

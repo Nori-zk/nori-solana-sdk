@@ -3,6 +3,8 @@ pub mod error;
 pub mod instructions;
 pub mod scram;
 pub mod state;
+pub mod deposit_witness;
+pub mod request_leaf_hash;
 
 use anchor_lang::prelude::*;
 
