@@ -233,9 +233,16 @@ pub fn handle_mint(
             MintTo {
                 mint: ctx.accounts.token.to_account_info(),
                 to: ctx.accounts.token_account.to_account_info(),
-                authority: ctx.accounts.payer.to_account_info(),
+                // Mint authority is the state PDA (set at initialize): sign the
+                // CPI with its seeds so only this instruction — after the
+                // deposit and SCRAM checks above — can mint.
+                authority: ctx.accounts.state.to_account_info(),
             },
-        ),
+        )
+        .with_signer(&[&[
+            NORI_SOL_TOKEN_BRIDGE_STATE_SEED,
+            &[ctx.bumps.state],
+        ]]),
         amount_to_mint,
     )?;
 

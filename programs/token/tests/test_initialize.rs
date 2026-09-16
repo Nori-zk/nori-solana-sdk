@@ -76,7 +76,11 @@ fn test_initialize() {
     assert_eq!(token_state.supply, 0);
     assert_eq!(
         token_state.mint_authority,
-        anchor_lang::solana_program::program_option::COption::Some(payer.pubkey())
+        anchor_lang::solana_program::program_option::COption::Some(state)
+    );
+    assert_eq!(
+        token_state.freeze_authority,
+        anchor_lang::solana_program::program_option::COption::Some(state)
     );
 
     let state_account = svm.get_account(&state).unwrap();

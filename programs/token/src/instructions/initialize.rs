@@ -13,20 +13,24 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = payer,
-        mint::authority = payer,
-        mint::decimals = TOKEN_DECIMALS,
-        seeds = [NORI_SOL_TOKEN_BRIDGE_SEED],
-        bump
-    )]
-    pub token: InterfaceAccount<'info, Token>,
-    #[account(
-        init,
-        payer = payer,
         space = 8 + NoriSolTokenBridge::INIT_SPACE,
         seeds = [NORI_SOL_TOKEN_BRIDGE_STATE_SEED],
         bump
     )]
     pub state: Account<'info, NoriSolTokenBridge>,
+    #[account(
+        init,
+        payer = payer,
+        // Mint authority is the state PDA, not a user key;
+        // no key can mint unbacked tokens directly, and
+        // claims are permissionless
+        mint::authority = state,
+        mint::freeze_authority = state,
+        mint::decimals = TOKEN_DECIMALS,
+        seeds = [NORI_SOL_TOKEN_BRIDGE_SEED],
+        bump
+    )]
+    pub token: InterfaceAccount<'info, Token>,
     pub system_program: Program<'info, System>,
     pub token_program: Interface<'info, TokenInterface>,
 }
