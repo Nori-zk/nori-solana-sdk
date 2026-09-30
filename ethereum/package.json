@@ -1,0 +1,59 @@
+{
+    "name": "@nori-zk/ethereum-token-bridge-solana-version",
+    "version": "0.0.16",
+    "description": "NoriTokenBridge contract",
+    "main": "build/index.js",
+    "publishConfig": {
+        "registry": "https://registry.npmjs.org/",
+        "access": "public"
+    },
+    "type": "module",
+    "scripts": {
+        "build": "ETH_NETWORK=hardhat npm run clean && ETH_NETWORK=hardhat hardhat compile && node stabilize-types.mjs . && tsc -p tsconfig.package.json",
+        "test": "ETH_NETWORK=hardhat hardhat test",
+        "test-ci": "ETH_NETWORK=hardhat hardhat test",
+        "typecheck": "tsc --noEmit",
+        "clean": "hardhat clean",
+        "format": "prettier --check --ignore-unknown **/*",
+        "format:fix": "prettier --write --ignore-unknown **/*",
+        "deploy": "dotenv -e .env -- sh -c 'npx hardhat --network $ETH_NETWORK deploy'",
+        "deploy-timelock": "dotenv -e .env -- sh -c 'npx hardhat --network $ETH_NETWORK deployTimelock'",
+        "test:lock": "dotenv -e .env -- sh -c 'npx hardhat --network $ETH_NETWORK lockTokens \"$@\"' --",
+        "test:lock-loop": "dotenv -e .env -- sh -c 'while true; do npx hardhat --network \"$ETH_NETWORK\" lockTokens \"$@\" || break; sleep 384; done' --",
+        "get-deposited": "dotenv -e .env -- sh -c 'npx hardhat --network $ETH_NETWORK getTotalDeposited \"$@\"' --",
+        "get-fee-info": "dotenv -e .env -- sh -c 'npx hardhat --network $ETH_NETWORK getFeeInfo'",
+        "preview-fees": "ETH_NETWORK=hardhat npx hardhat previewFees",
+        "set-fee-rate": "dotenv -e .env -- sh -c 'npx hardhat --network $ETH_NETWORK setFeeRate \"$@\"' --",
+        "set-fee-recipient": "dotenv -e .env -- sh -c 'npx hardhat --network $ETH_NETWORK setFeeRecipient \"$@\"' --",
+        "withdraw-fees": "dotenv -e .env -- sh -c 'npx hardhat --network $ETH_NETWORK withdrawFees'",
+        "set-proof-request-queue-fee": "dotenv -e .env -- sh -c 'npx hardhat --network $ETH_NETWORK setProofRequestQueueFee \"$@\"' --",
+        "withdraw-proof-request-queue-fees": "dotenv -e .env -- sh -c 'npx hardhat --network $ETH_NETWORK withdrawProofRequestQueueFees'",
+        "set-bridge-operator": "dotenv -e .env -- sh -c 'npx hardhat --network $ETH_NETWORK setBridgeOperator \"$@\"' --"
+    },
+    "author": "",
+    "license": "MIT",
+    "dependencies": {
+        "@openzeppelin/contracts": "5.0.2",
+        "esm-iso-logger": "1.0.2"
+    },
+    "devDependencies": {
+        "@nomicfoundation/hardhat-ethers": "^4.0.1",
+        "@nomicfoundation/hardhat-ethers-chai-matchers": "^3.0.0",
+        "@nomicfoundation/hardhat-keystore": "^3.0.7",
+        "@nomicfoundation/hardhat-mocha": "^3.0.17",
+        "@nomicfoundation/hardhat-network-helpers": "^3.0.6",
+        "@nomicfoundation/hardhat-typechain": "^3.0.0",
+        "@nomicfoundation/hardhat-viem": "^3.0.0",
+        "@types/mocha": "^10.0.0",
+        "@types/node": "^25.2.3",
+        "chai": "^5.1.2",
+        "dotenv": "^17.2.4",
+        "dotenv-cli": "^8.0.0",
+        "hardhat": "^3.1.11",
+        "npm-workspaces-publish-tool": "0.0.18",
+        "typechain": "^8.3.2"
+    },
+    "files": [
+        "build/"
+    ]
+}

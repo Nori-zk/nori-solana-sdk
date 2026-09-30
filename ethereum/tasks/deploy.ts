@@ -1,0 +1,182 @@
+import { writeFileSync } from "fs";
+import { task } from "hardhat/config";
+import path from "path";
+import { fileURLToPath } from "url";
+import "../logger.js";
+import { Logger } from "esm-iso-logger";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const logger = new Logger("Deploy");
+
+// Mirrors NoriProofRequestQueue; validated here so a bad value fails before
+// anything is deployed.
+const PROOF_REQUEST_QUEUE_FEE_GRANULARITY_WEI = 10n ** 12n;
+const MAX_PROOF_REQUEST_QUEUE_FEE_WEI = 5n * 10n ** 16n; // 0.05 ETH
+
+export const deploy = task(
+  "deploy",
+  "Deploy NoriProofRequestQueue and NoriTokenBridge"
+)
+  .setAction(async () => ({
+    default: async (_args, hre) => {
+      const { ethers } = await hre.network.getOrCreate();
+
+      const [deployer] = await ethers.getSigners();
+      const balance = await ethers.provider.getBalance(deployer.address);
+      const network = await ethers.provider.getNetwork();
+
+      const possibleEthNetwork = process.env.ETH_NETWORK;
+
+      const issues: string[] = [];
+
+      if (!possibleEthNetwork) issues.push("Missing required env: ETH_NETWORK");
+
+      const possibleProofRequestQueueFeeWei =
+        process.env.NORI_ETH_BRIDGE_PROOF_REQUEST_QUEUE_FEE_WEI;
+      let proofRequestQueueFeeWei = 0n;
+      if (possibleProofRequestQueueFeeWei) {
+        try {
+          proofRequestQueueFeeWei = BigInt(possibleProofRequestQueueFeeWei);
+        } catch {
+          issues.push(
+            `NORI_ETH_BRIDGE_PROOF_REQUEST_QUEUE_FEE_WEI must be an integer amount of wei, got: ${possibleProofRequestQueueFeeWei}`
+          );
+        }
+        if (proofRequestQueueFeeWei > MAX_PROOF_REQUEST_QUEUE_FEE_WEI)
+          issues.push(
+            `NORI_ETH_BRIDGE_PROOF_REQUEST_QUEUE_FEE_WEI exceeds MAX_PROOF_REQUEST_QUEUE_FEE of ${MAX_PROOF_REQUEST_QUEUE_FEE_WEI.toString()} wei`
+          );
+        if (
+          proofRequestQueueFeeWei % PROOF_REQUEST_QUEUE_FEE_GRANULARITY_WEI !==
+          0n
+        )
+          issues.push(
+            `NORI_ETH_BRIDGE_PROOF_REQUEST_QUEUE_FEE_WEI must be a multiple of ${PROOF_REQUEST_QUEUE_FEE_GRANULARITY_WEI.toString()} wei`
+          );
+      }
+
+      if (issues.length) {
+        logger.error("Deploy encountered errors:");
+        issues.forEach((issue, idx) => logger.warn(`  ${idx + 1}: ${issue}`));
+        logger.fatal(
+          "Due to issues with environment variables deploy cannot continue."
+        );
+        process.exit(1);
+      }
+
+      const bridgeOperator =
+        process.env.NORI_ETH_BRIDGE_OPERATOR_ADDRESS || deployer.address;
+      const feeRecipient =
+        process.env.NORI_ETH_BRIDGE_FEE_RECIPIENT_ADDRESS || ethers.ZeroAddress;
+
+      logger.log(`Deploying with account: ${deployer.address}`);
+      logger.log(`Deployer balance: ${ethers.formatEther(balance)} ETH`);
+      logger.log(`Network: ${network.name} (chainId: ${network.chainId})`);
+      logger.log(`Configuration:`);
+      logger.log(
+        `  NORI_ETH_BRIDGE_OPERATOR_ADDRESS: ${
+          process.env.NORI_ETH_BRIDGE_OPERATOR_ADDRESS ||
+          "(defaulting to deployer)"
+        }`
+      );
+      logger.log(
+        `  NORI_ETH_BRIDGE_FEE_RECIPIENT_ADDRESS: ${
+          process.env.NORI_ETH_BRIDGE_FEE_RECIPIENT_ADDRESS || "(not set)"
+        }`
+      );
+      logger.log(
+        `  NORI_ETH_BRIDGE_LOCK_FEE_RATE: ${
+          process.env.NORI_ETH_BRIDGE_LOCK_FEE_RATE || "(not set)"
+        }`
+      );
+      logger.log(
+        `  NORI_ETH_BRIDGE_PROOF_REQUEST_QUEUE_FEE_WEI: ${
+          possibleProofRequestQueueFeeWei || "(not set, defaulting to 0)"
+        }`
+      );
+
+      // Deploy NoriProofRequestQueue
+      // Must precede the bridge: the bridge takes the queue address as an
+      // immutable constructor argument. Governance is shared — the queue's
+      // operator is the same address as the bridge operator.
+      logger.log("Deploying NoriProofRequestQueue...");
+      const NoriProofRequestQueue = await ethers.getContractFactory(
+        "NoriProofRequestQueue"
+      );
+      const proofQueue = await NoriProofRequestQueue.deploy(
+        bridgeOperator,
+        feeRecipient,
+        proofRequestQueueFeeWei
+      );
+      const proofQueueDeployTx = proofQueue.deploymentTransaction();
+      if (!proofQueueDeployTx)
+        throw new Error("NoriProofRequestQueue did not deploy");
+      const proofQueueReceipt = await proofQueueDeployTx.wait();
+      if (!proofQueueReceipt)
+        throw new Error("NoriProofRequestQueue receipt invalid");
+      logger.log(`NoriProofRequestQueue deployed to: ${proofQueue.target}`);
+      logger.log(
+        `Proof request queue fee: ${ethers.formatEther(
+          proofRequestQueueFeeWei
+        )} ETH`
+      );
+      logger.log(`Gas used: ${proofQueueReceipt.gasUsed.toString()}`);
+
+      // Deploy NoriTokenBridge
+      logger.log("Deploying NoriTokenBridge...");
+      const NoriTokenBridge = await ethers.getContractFactory(
+        "NoriTokenBridge"
+      );
+      const tokenBridge = await NoriTokenBridge.deploy(
+        bridgeOperator,
+        proofQueue.target,
+        feeRecipient
+      );
+      const tokenBridgeDeployTx = tokenBridge.deploymentTransaction();
+      if (!tokenBridgeDeployTx)
+        throw new Error("NoriTokenBridge did not deploy");
+      const tokenBridgeReceipt = await tokenBridgeDeployTx.wait();
+      if (!tokenBridgeReceipt)
+        throw new Error("NoriTokenBridge receipt invalid");
+      logger.log(`NoriTokenBridge deployed to: ${tokenBridge.target}`);
+      logger.log(`Deployed in block: ${tokenBridgeReceipt.blockNumber}`);
+      logger.log(`Gas used: ${tokenBridgeReceipt.gasUsed.toString()}`);
+
+      const lockFeeRate = process.env.NORI_ETH_BRIDGE_LOCK_FEE_RATE;
+      if (lockFeeRate) {
+        logger.log(`Setting lock fee rate: ${lockFeeRate} (1 unit = 0.001%)`);
+        const setLockFeeRateTx = await tokenBridge.setLockFeeRate(
+          parseInt(lockFeeRate)
+        );
+        await setLockFeeRateTx.wait();
+      }
+
+      // Write deployment details to .env.nori-eth-token-bridge
+      const envFilePath = path.resolve(
+        __dirname,
+        "..",
+        ".env.nori-eth-token-bridge"
+      );
+      const env = {
+        NORI_ETH_TOKEN_BRIDGE_ADDRESS: tokenBridge.target,
+        NORI_ETH_PROOF_QUEUE_ADDRESS: proofQueue.target,
+        NORI_ETH_BRIDGE_OPERATOR_ADDRESS: bridgeOperator,
+      };
+      const envContent =
+        Object.entries(env)
+          .map(function ([key, value]) {
+            return `${key}=${value}`;
+          })
+          .join("\n") + "\n";
+      writeFileSync(envFilePath, envContent, { encoding: "utf8" });
+
+      logger.log(`Wrote ${envFilePath}`);
+      logger.log("Environment variables for future use:");
+      for (const [key, value] of Object.entries(env)) {
+        logger.log(`${key}=${value}`);
+      }
+    },
+  }))
+  .build();
