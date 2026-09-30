@@ -66,7 +66,6 @@ use sp1_solana::{verify_proof, SP1Groth16Proof};
 /// state.
 pub fn handle_update(ctx: Context<Update>, proof: SP1Groth16Proof) -> Result<()> {
     // Hex encode the vkey_hash
-    ctx.accounts.state.nori_bridge_vk;
     let vkey_hash = format!("0x{}", hex::encode(ctx.accounts.state.nori_bridge_vk));
 
     // Verify the proof

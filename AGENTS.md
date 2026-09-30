@@ -67,8 +67,6 @@ cargo check -p token        # from repo root; native check of the Solana program
 
 ## Known open items (also in README.md)
 
-- `mint`/`update` handlers are not registered in the `#[program]` block in
-  `programs/token/src/lib.rs` — only `initialize` is reachable on-chain.
 - `mint` computes the witness root but does not check it against the ring
   buffer yet (deposit membership unverified).
 

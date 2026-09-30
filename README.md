@@ -96,9 +96,6 @@ has 1.89. Expected fix is downgrading alloy versions in Cargo.lock
 
 ## Open items
 
-- `mint` and `update` handlers are implemented under
-  `programs/token/src/instructions/` but not registered in the `#[program]`
-  block in `lib.rs` — only `initialize` is reachable on-chain today.
 - `mint` does not yet check the witness root against the ring buffer, so
   deposit membership is not verified. Waiting on a real proof to test
   against.
