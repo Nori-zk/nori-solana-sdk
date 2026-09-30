@@ -10,6 +10,7 @@ use anchor_lang::{
 };
 use solana_compute_budget_interface::ComputeBudgetInstruction;
 use solana_keypair::Keypair;
+use solana_loader_v3_interface::{instruction as loader_v3, state::UpgradeableLoaderState};
 use solana_message::{Message, VersionedMessage};
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use solana_signer::Signer;
@@ -20,6 +21,10 @@ use std::str::FromStr;
 /// Groth16 verification is the dominant cost; cap the budget so the
 /// transaction is never CU-starved (unused units are not charged).
 const UPDATE_COMPUTE_UNIT_LIMIT: u32 = 1_400_000;
+
+/// Program bytes are written one chunk per transaction; sized so a write
+/// plus its accounts fits a legacy transaction (same ballpark the CLI uses).
+const BUFFER_WRITE_CHUNK_LEN: usize = 1_012;
 
 #[derive(Debug, Clone)]
 pub struct SolanaTransactionResult {
@@ -132,21 +137,120 @@ impl SolanaProofSubmitter {
         ]
     }
 
+    /// Submit the one-off `initialize` transaction that creates the bridge
+    /// state PDA and the token mint (see DEPLOYMENT.md §6). Must land before
+    /// any `update`; the init values come from the first proof's public
+    /// values — see [`crate::LoadedProof::bridge_init`].
+    pub async fn submit_initialize(
+        &self,
+        init_values: token::state::NoriSolTokenBridgeInit,
+    ) -> Result<SolanaTransactionResult, SubmitterError> {
+        let instructions = vec![self.build_initialize_instruction(init_values)];
+        self.send_instructions_with_signers(instructions, &[], "initialize")
+            .await
+    }
+
     /// Submit one proof batch as an `update` transaction.
     pub async fn submit_update(
         &self,
         proof: &SP1Groth16Proof,
     ) -> Result<SolanaTransactionResult, SubmitterError> {
-        let client = RpcClient::new(self.rpc_url.clone());
         let instructions = self.build_update_instructions(proof);
+        self.send_instructions_with_signers(instructions, &[], "update")
+            .await
+    }
+
+    /// Deploy a compiled program (raw `.so` bytes) to the configured RPC via
+    /// the upgradeable loader: create buffer → write chunks → deploy. The
+    /// payer covers fees and rent and becomes the upgrade authority; the
+    /// program lands at `program_keypair`'s address.
+    ///
+    /// Dev/test convenience. Production deploys should use the Solana CLI
+    /// (DEPLOYMENT.md §5): it batches writes in parallel and resumes
+    /// interrupted uploads; this implementation is sequential and does not
+    /// resume — a failure mid-write abandons the (recoverable) buffer.
+    pub async fn deploy_program(
+        &self,
+        program_keypair: &Keypair,
+        program_data: &[u8],
+    ) -> Result<SolanaTransactionResult, SubmitterError> {
+        let client = RpcClient::new(self.rpc_url.clone());
+        let payer = self.payer.pubkey();
+
+        let buffer = Keypair::new();
+        let buffer_lamports = client
+            .get_minimum_balance_for_rent_exemption(UpgradeableLoaderState::size_of_buffer(
+                program_data.len(),
+            ))
+            .await?;
+        let create = loader_v3::create_buffer(
+            &payer,
+            &buffer.pubkey(),
+            &payer,
+            buffer_lamports,
+            program_data.len(),
+        )
+        .map_err(|e| SubmitterError::TransactionBuild(e.to_string()))?;
+        self.send_instructions_with_signers(create, &[&buffer], "buffer create")
+            .await?;
+
+        // Fire the chunk writes without per-transaction confirmation
+        // (hundreds of txs), then confirm the last one — the batching
+        // strategy the Solana CLI uses. Local and RPC endpoints process
+        // these in order; the final confirm proves the whole batch landed.
+        let blockhash = client.get_latest_blockhash().await?;
+        let mut last_signature = None;
+        for (index, chunk) in program_data.chunks(BUFFER_WRITE_CHUNK_LEN).enumerate() {
+            let write = loader_v3::write(
+                &buffer.pubkey(),
+                &payer,
+                (index * BUFFER_WRITE_CHUNK_LEN) as u32,
+                chunk.to_vec(),
+            );
+            let msg = Message::new_with_blockhash(&[write], Some(&payer), &blockhash);
+            let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[&self.payer])
+                .map_err(|e| SubmitterError::TransactionBuild(e.to_string()))?;
+            last_signature = Some(client.send_transaction(&tx).await?);
+        }
+        if let Some(signature) = last_signature {
+            client.confirm_transaction(&signature).await?;
+        }
+
+        let program_lamports = client
+            .get_minimum_balance_for_rent_exemption(UpgradeableLoaderState::size_of_program())
+            .await?;
+        let deploy = loader_v3::deploy_with_max_program_len(
+            &payer,
+            &program_keypair.pubkey(),
+            &buffer.pubkey(),
+            &payer,
+            program_lamports,
+            program_data.len() * 2,
+        )
+        .map_err(|e| SubmitterError::TransactionBuild(e.to_string()))?;
+        self.send_instructions_with_signers(deploy, &[program_keypair], "program deploy")
+            .await
+    }
+
+    /// Shared send path: blockhash, sign with the payer plus any extra
+    /// signers, send and confirm.
+    async fn send_instructions_with_signers(
+        &self,
+        instructions: Vec<Instruction>,
+        extra_signers: &[&Keypair],
+        what: &str,
+    ) -> Result<SolanaTransactionResult, SubmitterError> {
+        let client = RpcClient::new(self.rpc_url.clone());
         let blockhash = client.get_latest_blockhash().await?;
         let msg =
             Message::new_with_blockhash(&instructions, Some(&self.payer.pubkey()), &blockhash);
-        let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[&self.payer])
+        let mut signers: Vec<&Keypair> = vec![&self.payer];
+        signers.extend_from_slice(extra_signers);
+        let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &signers)
             .map_err(|e| SubmitterError::TransactionBuild(e.to_string()))?;
         let signature = client.send_and_confirm_transaction(&tx).await?;
         log::info!(
-            "submitted Nori update tx {} through {}",
+            "submitted Nori {what} tx {} through {}",
             signature,
             self.rpc_url
         );

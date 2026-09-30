@@ -31,6 +31,8 @@ pub enum ProofFileError {
     EncodedProofLength { got: usize, want: usize },
     #[error("public_values.buffer.data is empty")]
     EmptyPublicValues,
+    #[error("failed to decode public values: {0}")]
+    PublicValues(String),
     #[error("public_inputs must have 5 entries, got {0}")]
     PublicInputsLength(usize),
     #[error("public_inputs[0] (program vkey) does not fit in 32 bytes: {0}")]
@@ -74,6 +76,41 @@ pub struct LoadedProof {
     /// `public_inputs[0]` — the SP1 program vkey hash (`vk.bytes32()`), to be
     /// pinned as `nori_bridge_vk` at `initialize`.
     pub program_vkey: [u8; 32],
+}
+
+impl LoadedProof {
+    /// Decoded public values (the 220-byte big-endian `ProofOutputs`).
+    pub fn outputs(
+        &self,
+    ) -> Result<nori_sp1_helios_primitives::types::ProofOutputs, ProofFileError> {
+        nori_sp1_helios_primitives::types::ProofOutputs::from_bytes(&self.wire.sp1_public_inputs)
+            .map_err(|e| ProofFileError::PublicValues(e.to_string()))
+    }
+
+    /// `initialize` arguments that make THIS proof a valid first update: the
+    /// bridge resumes from the proof's own input side (slot, store hash,
+    /// queue cursor), pins its queue address, and trusts its proving program
+    /// (`program_vkey`). This proof (or its chain successor) is then the
+    /// first valid `update`.
+    ///
+    /// `verified_state_root` is the execution state root at the start point;
+    /// it is not part of update-continuity checks.
+    pub fn bridge_init(
+        &self,
+        verified_state_root: alloy_primitives::B256,
+        eth_token_bridge_address: alloy_primitives::Address,
+    ) -> Result<token::state::NoriSolTokenBridgeInit, ProofFileError> {
+        let outputs = self.outputs()?;
+        Ok(token::state::NoriSolTokenBridgeInit {
+            verified_state_root,
+            nori_bridge_vk: alloy_primitives::B256::from(self.program_vkey),
+            latest_helios_store_input_hash: outputs.input_store_hash,
+            eth_proof_queue_address: outputs.proof_request_queue_address,
+            eth_token_bridge_address,
+            latest_head: outputs.input_slot,
+            queue_cursor: outputs.input_queue_cursor,
+        })
+    }
 }
 
 fn parse_file(path: &Path) -> Result<LoadedProof, ProofFileError> {

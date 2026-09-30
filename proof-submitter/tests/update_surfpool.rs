@@ -4,9 +4,9 @@
 //!
 //! Every test boots its own `surfpool start --offline --no-deploy` on a free
 //! port (initialize is one-shot per program id, so scenarios can't share a
-//! chain), deploys `target/deploy/token.so`, and tears the validator down on
-//! drop. Requires `surfpool` and the Solana CLI on PATH; the .so must be
-//! built first (`cargo build-sbf`, see DEVELOPMENT_GUIDE.md).
+//! chain), deploys `target/deploy/token.so` through the submitter crate, and
+//! tears the validator down on drop. Requires `surfpool` on PATH; the .so
+//! must be built first (`cargo build-sbf`, see DEVELOPMENT_GUIDE.md).
 
 use {
     alloy_primitives::{Address, B256},
@@ -43,7 +43,7 @@ fn load_proofs() -> Vec<LoadedProof> {
 }
 
 fn outputs(proof: &LoadedProof) -> ProofOutputs {
-    ProofOutputs::from_bytes(&proof.wire.sp1_public_inputs).expect("public values decode")
+    proof.outputs().expect("public values decode")
 }
 
 fn free_port() -> u16 {
@@ -107,42 +107,24 @@ async fn airdrop(client: &RpcClient, to: &Pubkey, sol: u64) {
     }
 }
 
-/// Deploy target/deploy/token.so via the Solana CLI (same flow as
-/// DEVELOPMENT_GUIDE.md), paid by `payer`. The CLI derives its TPU websocket
-/// from the RPC URL, so the ws URL must be passed explicitly when the
-/// validator's ws port is not rpc+1.
-fn deploy_program(rpc_url: &str, ws_url: &str, payer: &Keypair) {
-    let dir = std::env::temp_dir();
-    let payer_path = dir.join(format!(
-        "nori-test-payer-{}-{}.json",
-        std::process::id(),
-        payer.pubkey()
-    ));
-    let bytes: Vec<u8> = payer.to_bytes().to_vec();
-    std::fs::write(&payer_path, serde_json::to_string(&bytes).unwrap()).unwrap();
-    let output = Command::new("solana")
-        .args([
-            "program",
-            "deploy",
-            PROGRAM_SO,
-            "-k",
-            payer_path.to_str().unwrap(),
-            "--url",
-            rpc_url,
-            "--ws",
-            ws_url,
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("failed to run solana CLI");
-    std::fs::remove_file(&payer_path).ok();
-    assert!(
-        output.status.success(),
-        "program deploy failed:\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+/// Read a Solana CLI keypair file (JSON array of 64 bytes).
+fn read_keypair(path: &str) -> Keypair {
+    let text = std::fs::read_to_string(path).expect("keypair file readable");
+    let bytes: Vec<u8> = serde_json::from_str(&text).expect("keypair json");
+    Keypair::try_from(&bytes[..]).expect("valid keypair")
+}
+
+/// Deploy target/deploy/token.so through the submitter crate's own
+/// upgradeable-loader path (create buffer → chunked writes → deploy), with
+/// the payer as upgrade authority. The program id comes from
+/// target/deploy/token-keypair.json, matching the program's declare_id.
+async fn deploy_program(submitter: &SolanaProofSubmitter, program_keypair: &Keypair) {
+    let program_data =
+        std::fs::read(PROGRAM_SO).expect("token.so missing — build it first (see README)");
+    submitter
+        .deploy_program(program_keypair, &program_data)
+        .await
+        .expect("program deploy");
 }
 
 async fn setup() -> SurfpoolHarness {
@@ -180,8 +162,6 @@ async fn setup_with(f: impl FnOnce(&mut NoriSolTokenBridgeInit)) -> SurfpoolHarn
     let client = RpcClient::new(rpc_url.clone());
     let payer = Keypair::new();
     airdrop(&client, &payer.pubkey(), 20).await;
-    let ws_url = format!("ws://127.0.0.1:{ws_port}");
-    deploy_program(&rpc_url, &ws_url, &payer);
 
     let program_id = token::id();
     let submitter = SolanaProofSubmitter::new(
@@ -190,32 +170,26 @@ async fn setup_with(f: impl FnOnce(&mut NoriSolTokenBridgeInit)) -> SurfpoolHarn
         program_id,
     );
 
+    // The program id comes from the build-sbf-generated keypair next to the
+    // .so (the declare_id must match).
+    let program_keypair = read_keypair(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../target/deploy/token-keypair.json"
+    ));
+    assert_eq!(program_keypair.pubkey(), program_id);
+    deploy_program(&submitter, &program_keypair).await;
+
+    // Initialize from the first proof's public values (verified_state_root
+    // is not part of update-continuity checks; a real deployment uses the
+    // execution state root at the start point).
     let proofs = load_proofs();
-    let first = outputs(&proofs[0]);
-    let mut init_values = NoriSolTokenBridgeInit {
-        // Not part of update-continuity checks; a real deployment uses the
-        // execution state root at the start point.
-        verified_state_root: B256::ZERO,
-        nori_bridge_vk: B256::from(proofs[0].program_vkey),
-        latest_helios_store_input_hash: first.input_store_hash,
-        eth_proof_queue_address: first.proof_request_queue_address,
-        eth_token_bridge_address: Address::ZERO,
-        latest_head: first.input_slot,
-        queue_cursor: first.input_queue_cursor,
-    };
+    let mut init_values = proofs[0]
+        .bridge_init(B256::ZERO, Address::ZERO)
+        .expect("init values from proof 0");
     f(&mut init_values);
 
-    let init_ix = submitter.build_initialize_instruction(init_values);
-    let blockhash = client.get_latest_blockhash().await.unwrap();
-    let msg =
-        solana_message::Message::new_with_blockhash(&[init_ix], Some(&payer.pubkey()), &blockhash);
-    let tx = solana_transaction::versioned::VersionedTransaction::try_new(
-        solana_message::VersionedMessage::Legacy(msg),
-        &[&payer],
-    )
-    .unwrap();
-    client
-        .send_and_confirm_transaction(&tx)
+    submitter
+        .submit_initialize(init_values)
         .await
         .expect("initialize must succeed");
 

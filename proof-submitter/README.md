@@ -36,7 +36,17 @@ Wire format, from the proof JSON fields:
 - `build_update_instructions(&proof.wire)` — the `update` instruction
   plus a 1.4M compute-unit-limit instruction (Groth16 verification is
   the dominant cost; unused units are not charged).
+- `deploy_program(&program_keypair, &so_bytes).await` — deploys a compiled
+  program via the upgradeable loader (create buffer → chunked writes →
+  deploy). Dev/test convenience: sequential, no resume. Production deploys
+  should use the CLI below, which batches in parallel and resumes.
 - `build_initialize_instruction(init_values)` — one-off bridge setup.
+- `submit_initialize(init_values).await` — sends and confirms the one-off
+  `initialize` transaction (creates the state PDA and the token mint). The
+  init values come from the first proof:
+  `proofs[0].bridge_init(verified_state_root, eth_token_bridge_address)`,
+  which resumes the bridge from the proof's input side (slot, store hash,
+  queue cursor) and pins its queue address and `program_vkey`.
 - `submit_update(&proof.wire).await` — sends and confirms the
   transaction, returns `SolanaTransactionResult { tx_hash }`.
 
@@ -50,7 +60,10 @@ Wire format, from the proof JSON fields:
 
 ## Build & deploy the program
 
-The program must be deployed before any `update` will land. From the
+The program must be deployed before any `update` will land. For tests and
+local validators, `SolanaProofSubmitter::deploy_program` does it from
+Rust — that is what the e2e suite uses, so it needs only `surfpool`.
+Production deploys use the CLI (parallel batches, resumable). From the
 repo root:
 
 ```bash
@@ -105,7 +118,7 @@ export SOLANA_RPC_NETWORK_URL=http://127.0.0.1:8899
 export SOLANA_PAYER_KEYPAIR_PATH=$HOME/.config/solana/id.json
 ```
 
-Then initialize the bridge (`build_initialize_instruction`, with
-`nori_bridge_vk` set to the first proof's `program_vkey` and the
-continuity fields from its public values) and call `submit_update` per
-proof — see `tests/update_surfpool.rs` for the full sequence.
+Then initialize the bridge with the first proof's init values
+(`proofs[0].bridge_init(verified_state_root, eth_token_bridge_address)` via
+`submit_initialize`) and call `submit_update` per proof — see
+`tests/update_surfpool.rs` for the full sequence.
