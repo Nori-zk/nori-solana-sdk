@@ -33,10 +33,11 @@ pub struct UpdateApplied {
 #[derive(Accounts)]
 pub struct Update<'info> {
     #[account(
+        mut,
         seeds = [NORI_SOL_TOKEN_BRIDGE_STATE_SEED],
         bump
     )]
-    pub state: Account<'info, NoriSolTokenBridge>,
+    pub state: AccountLoader<'info, NoriSolTokenBridge>,
     pub system_program: Program<'info, System>,
 }
 use nori_sp1_helios_primitives::types::ProofOutputs;
@@ -65,8 +66,10 @@ use sp1_solana::{verify_proof, SP1Groth16Proof};
 /// any value the proof commits to breaks continuity with the bridge's current
 /// state.
 pub fn handle_update(ctx: Context<Update>, proof: SP1Groth16Proof) -> Result<()> {
+    let mut state = ctx.accounts.state.load_mut()?;
+
     // Hex encode the vkey_hash
-    let vkey_hash = format!("0x{}", hex::encode(ctx.accounts.state.nori_bridge_vk));
+    let vkey_hash = format!("0x{}", hex::encode(state.nori_bridge_vk));
 
     // Verify the proof
     verify_proof(&proof.proof, proof.sp1_public_inputs.as_slice(), &vkey_hash).map_err(|e| {
@@ -85,49 +88,49 @@ pub fn handle_update(ctx: Context<Update>, proof: SP1Groth16Proof) -> Result<()>
     // ================================================================
 
     // Verify the proof anchors its storage witnesses on the expected queue
-    (ctx.accounts.state.eth_proof_queue_address == proof_outputs.proof_request_queue_address)
+    (state.eth_proof_queue_address == proof_outputs.proof_request_queue_address)
         .then_some(())
         .ok_or_else(|| {
             msg!(
                 "ETH proof queue address mismatch, proof contained address: {}, on chain state is: 0x{}",
                 proof_outputs.proof_request_queue_address,
-                hex::encode(ctx.accounts.state.eth_proof_queue_address)
+                hex::encode(state.eth_proof_queue_address)
             );
             error!(UpdateError::ETHProofQueueAddressMismatch)
         })?;
 
     // Cursor continuity: the proof must resume exactly where the last one settled
-    (ctx.accounts.state.queue_cursor == proof_outputs.input_queue_cursor)
+    (state.queue_cursor == proof_outputs.input_queue_cursor)
         .then_some(())
         .ok_or_else(|| {
             msg!(
                 "Queue cursor mismatch, proof resumes from: {}, on chain state is: {}",
                 proof_outputs.input_queue_cursor,
-                ctx.accounts.state.queue_cursor
+                state.queue_cursor
             );
             error!(UpdateError::QueueCursorMismatch)
         })?;
 
     // Input slot must pick up exactly where the last verified head left off
-    (proof_outputs.input_slot == ctx.accounts.state.latest_head)
+    (proof_outputs.input_slot == state.latest_head)
         .then_some(())
         .ok_or_else(|| {
             msg!(
                 "Input slot mismatch, proof input slot: {}, on chain latest head is: {}",
                 proof_outputs.input_slot,
-                ctx.accounts.state.latest_head
+                state.latest_head
             );
             error!(UpdateError::InputSlotMismatch)
         })?;
 
     // Input store hash must chain from the last verified store hash
-    (proof_outputs.input_store_hash == ctx.accounts.state.latest_helios_store_input_hash)
+    (proof_outputs.input_store_hash == state.latest_helios_store_input_hash)
         .then_some(())
         .ok_or_else(|| {
             msg!(
                 "Input store hash mismatch, proof input store hash: {}, on chain state is: 0x{}",
                 proof_outputs.input_store_hash,
-                hex::encode(ctx.accounts.state.latest_helios_store_input_hash)
+                hex::encode(state.latest_helios_store_input_hash)
             );
             error!(UpdateError::InputStoreHashMismatch)
         })?;
@@ -156,7 +159,7 @@ pub fn handle_update(ctx: Context<Update>, proof: SP1Groth16Proof) -> Result<()>
     // Commit the update to bridge state
     // ================================================================
 
-    ctx.accounts.state.apply_update(&proof_outputs);
+    state.apply_update(&proof_outputs);
 
     // ================================================================
     // Emit success event / message
@@ -165,15 +168,15 @@ pub fn handle_update(ctx: Context<Update>, proof: SP1Groth16Proof) -> Result<()>
     emit!(UpdateApplied {
         output_slot: proof_outputs.output_slot,
         queue_cursor: proof_outputs.output_queue_cursor,
-        verified_state_root: ctx.accounts.state.verified_state_root,
-        window_index: ctx.accounts.state.window_index,
+        verified_state_root: state.verified_state_root,
+        window_index: state.window_index,
     });
 
     msg!(
         "Update applied: slot {}, cursor {}, window {}",
         proof_outputs.output_slot,
-        ctx.accounts.state.queue_cursor,
-        ctx.accounts.state.window_index
+        state.queue_cursor,
+        state.window_index
     );
     Ok(())
 }

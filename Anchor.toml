@@ -7,7 +7,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-token = "2J24QuEjM9HgPgmgV2SURCUyfsTrkGiwGsAFeH5tnuL8"
+token = "5xS32i7XNRk7JCjYR7RgfHVxdLepVSnnJ1gdHkmfD8W1"
 
 [provider]
 cluster = "localnet"

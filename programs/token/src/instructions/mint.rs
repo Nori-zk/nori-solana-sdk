@@ -5,8 +5,8 @@ use anchor_spl::token_interface::{mint_to, Mint as Token, MintTo, TokenInterface
 use solana_sha256_hasher::hash;
 
 use crate::{
-    constants::*, deposit_witness::VerifiedRequestWitnessInput,
-    state::NoriSolTokenAccountStorage, state::NoriSolTokenBridge,
+    constants::*, deposit_witness::VerifiedRequestWitnessInput, state::NoriSolTokenAccountStorage,
+    state::NoriSolTokenBridge,
 };
 
 #[error_code]
@@ -39,9 +39,9 @@ pub struct Mint<'info> {
     pub recipient: Signer<'info>,
 
     #[account(mut, seeds = [NORI_SOL_TOKEN_BRIDGE_STATE_SEED], bump)]
-    pub state: Account<'info, NoriSolTokenBridge>,
+    pub state: AccountLoader<'info, NoriSolTokenBridge>,
     #[account(mut, seeds = [NORI_SOL_TOKEN_BRIDGE_SEED], bump)]
-    pub token: InterfaceAccount<'info, Token>,
+    pub token: Box<InterfaceAccount<'info, Token>>,
     /// CHECK: address and type are validated by the associated_token program's
     /// create_idempotent CPI below, which derives the ATA address itself and
     /// verifies any pre-existing account at it is a valid token account for
@@ -143,13 +143,18 @@ pub fn handle_mint(ctx: Context<Mint>, deposit_witness: VerifiedRequestWitnessIn
     let root = deposit_witness.root();
     let request = &deposit_witness.value;
 
-    (request.target == Address::from(ctx.accounts.state.eth_token_bridge_address))
+    let eth_token_bridge_address = {
+        let state = ctx.accounts.state.load()?;
+        state.eth_token_bridge_address
+    };
+
+    (request.target == Address::from(eth_token_bridge_address))
         .then_some(())
         .ok_or_else(|| {
             msg!(
                 "Deposit target mismatch, leaf target: {}, expected token bridge address: 0x{}",
                 request.target,
-                hex::encode(ctx.accounts.state.eth_token_bridge_address)
+                hex::encode(eth_token_bridge_address)
             );
             error!(MintError::NotTokenBridgeRequest)
         })?;
@@ -197,12 +202,10 @@ pub fn handle_mint(ctx: Context<Mint>, deposit_witness: VerifiedRequestWitnessIn
 
     let amount_to_mint = locked_so_far - storage.minted_so_far;
 
-    (amount_to_mint > 0)
-        .then_some(())
-        .ok_or_else(|| {
-            msg!("No new amount to mint");
-            error!(MintError::ZeroMintAmount)
-        })?;
+    (amount_to_mint > 0).then_some(()).ok_or_else(|| {
+        msg!("No new amount to mint");
+        error!(MintError::ZeroMintAmount)
+    })?;
 
     storage.minted_so_far = locked_so_far;
     storage.try_serialize(&mut *storage_data)?;
@@ -229,10 +232,7 @@ pub fn handle_mint(ctx: Context<Mint>, deposit_witness: VerifiedRequestWitnessIn
                 authority: ctx.accounts.state.to_account_info(),
             },
         )
-        .with_signer(&[&[
-            NORI_SOL_TOKEN_BRIDGE_STATE_SEED,
-            &[ctx.bumps.state],
-        ]]),
+        .with_signer(&[&[NORI_SOL_TOKEN_BRIDGE_STATE_SEED, &[ctx.bumps.state]]]),
         amount_to_mint,
     )?;
 

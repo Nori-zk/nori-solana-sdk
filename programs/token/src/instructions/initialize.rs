@@ -1,23 +1,23 @@
 use anchor_lang::prelude::*;
-use anchor_spl::{
-    token_interface::Mint as Token,
-    token_interface::TokenInterface
-};
+use anchor_spl::{token_interface::Mint as Token, token_interface::TokenInterface};
 
-use crate::{constants::*,state::*};
+use crate::{constants::*, state::*};
 
 #[derive(Accounts)]
 pub struct Initialize<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
+    // init via CPI is fine here: 5 576 bytes is under the 10 KiB CPI
+    // creation limit; the loader then initializes the zero-copy state in
+    // place (see state.rs).
     #[account(
         init,
         payer = payer,
-        space = 8 + NoriSolTokenBridge::INIT_SPACE,
+        space = 8 + std::mem::size_of::<NoriSolTokenBridge>(),
         seeds = [NORI_SOL_TOKEN_BRIDGE_STATE_SEED],
         bump
     )]
-    pub state: Account<'info, NoriSolTokenBridge>,
+    pub state: AccountLoader<'info, NoriSolTokenBridge>,
     #[account(
         init,
         payer = payer,
@@ -30,28 +30,25 @@ pub struct Initialize<'info> {
         seeds = [NORI_SOL_TOKEN_BRIDGE_SEED],
         bump
     )]
-    pub token: InterfaceAccount<'info, Token>,
+    pub token: Box<InterfaceAccount<'info, Token>>,
     pub system_program: Program<'info, System>,
     pub token_program: Interface<'info, TokenInterface>,
 }
 
-pub fn handle_initialize(ctx: Context<Initialize>, init_values: NoriSolTokenBridgeInit) -> Result<()> {
-    ctx.accounts.state.set_inner((init_values, ctx.accounts.payer.key()).into());
-    // also todo
-    //ctx.accounts.token.supply;
-    //ctx.accounts.token.mint_authority;
-    //ctx.accounts.token.freeze_authority = ctx.accounts.payer.key();
-
-    // Todo
-    /*let cpi_accounts = anchor_lang::system_program::Transfer {
-        from: ctx.accounts.payer.to_account_info(),
-        to: ctx.accounts.counter.to_account_info(),
-    };
-    let cpi_ctx = CpiContext::new(anchor_lang::system_program::ID, cpi_accounts);
-    anchor_lang::system_program::transfer(cpi_ctx, HELLO_WORLD_LAMPORTS)?;
-
-    msg!("Hello, world! Counter initialized");
-    */
+pub fn handle_initialize(
+    ctx: Context<Initialize>,
+    init_values: NoriSolTokenBridgeInit,
+) -> Result<()> {
+    let mut state = ctx.accounts.state.load_init()?;
+    state.authority = ctx.accounts.payer.key();
+    state.latest_head = init_values.latest_head;
+    state.verified_state_root = init_values.verified_state_root.into();
+    state.nori_bridge_vk = init_values.nori_bridge_vk.into();
+    state.latest_helios_store_input_hash = init_values.latest_helios_store_input_hash.into();
+    state.eth_proof_queue_address = init_values.eth_proof_queue_address.into();
+    state.eth_token_bridge_address = init_values.eth_token_bridge_address.into();
+    state.queue_cursor = init_values.queue_cursor;
+    state.window_index = 0;
 
     msg!("NoriSolTokenBridge initialized");
 

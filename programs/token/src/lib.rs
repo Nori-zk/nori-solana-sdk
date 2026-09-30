@@ -1,9 +1,9 @@
 pub mod constants;
+pub mod deposit_witness;
 pub mod error;
 pub mod instructions;
-pub mod state;
-pub mod deposit_witness;
 pub mod request_leaf_hash;
+pub mod state;
 
 use anchor_lang::prelude::*;
 
@@ -11,7 +11,7 @@ pub use constants::*;
 pub use instructions::*;
 pub use state::*;
 
-declare_id!("2J24QuEjM9HgPgmgV2SURCUyfsTrkGiwGsAFeH5tnuL8");
+declare_id!("5xS32i7XNRk7JCjYR7RgfHVxdLepVSnnJ1gdHkmfD8W1");
 
 #[program]
 pub mod token {

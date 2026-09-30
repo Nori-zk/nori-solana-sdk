@@ -1,7 +1,7 @@
-use std::fmt;
 use alloy_primitives::{Address, B256, U256};
 use anchor_lang::{AnchorDeserialize, AnchorSerialize};
 use nori_sp1_helios_primitives::storage_layout::MAX_COLLECTION_KEYS;
+use std::fmt;
 
 use crate::constants::{MAX_BATCH, MAX_TREE_DEPTH};
 use solana_sha256_hasher::hashv;
@@ -99,7 +99,9 @@ impl VerifiedRequestWitnessInput {
                 max: MAX_TREE_DEPTH,
             });
         }
-        self.value.validate().map_err(WitnessInputError::InvalidValue)?;
+        self.value
+            .validate()
+            .map_err(WitnessInputError::InvalidValue)?;
         Ok(())
     }
 

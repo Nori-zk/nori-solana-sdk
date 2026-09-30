@@ -1,9 +1,16 @@
 use crate::constants::MAX_PROOF_USAGE_WINDOW;
 use alloy_primitives::{Address, B256};
 use anchor_lang::prelude::*;
+use bytemuck::{Pod, Zeroable};
 use nori_sp1_helios_primitives::types::ProofOutputs;
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Default, InitSpace)]
+// Zero-copy layout: the state account is ~5.6 KB, far past the 4 KB SBF
+// stack frame, so the struct is never instantiated on stack — handlers
+// access it by reference directly in account memory. All fields are
+// fixed-size and the explicit padding keeps the struct padding-free
+// (a bytemuck::Pod requirement).
+#[derive(Copy, Clone, Default, Pod, Zeroable)]
+#[repr(C)]
 pub struct ProofRequestRootEntry {
     pub root: [u8; 32],           // 32 bytes
     pub output_block_number: u64, // 8 bytes
@@ -11,8 +18,8 @@ pub struct ProofRequestRootEntry {
     pub output_queue_cursor: u64, // 8 bytes
 }
 
-#[account]
-#[derive(InitSpace)]
+#[account(zero_copy)]
+#[repr(C)]
 pub struct NoriSolTokenBridge {
     pub authority: Pubkey,
     pub verified_state_root: [u8; 32],
@@ -23,9 +30,13 @@ pub struct NoriSolTokenBridge {
     pub eth_token_bridge_address: [u8; 20],
     pub queue_cursor: u64,
     pub window_index: u8,
+    pub _padding: [u8; 7],
     pub window_buffer: [ProofRequestRootEntry; MAX_PROOF_USAGE_WINDOW],
 }
 
+/// Instruction arguments for `initialize` (~160 bytes — fine on stack).
+/// Written into the zeroed state account field by field; building the whole
+/// state struct on stack first would blow the 4 KB frame.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct NoriSolTokenBridgeInit {
     pub verified_state_root: B256,
@@ -33,24 +44,11 @@ pub struct NoriSolTokenBridgeInit {
     pub latest_helios_store_input_hash: B256,
     pub eth_proof_queue_address: Address,
     pub eth_token_bridge_address: Address,
+    /// Beacon slot of the state the bridge starts from. The first accepted
+    /// `update` must have `input_slot == latest_head`, so this pins where the
+    /// proven chain resumes.
+    pub latest_head: u64,
     pub queue_cursor: u64,
-}
-
-impl From<(NoriSolTokenBridgeInit, Pubkey)> for NoriSolTokenBridge {
-    fn from((init, authority): (NoriSolTokenBridgeInit, Pubkey)) -> Self {
-        Self {
-            authority,
-            latest_head: 0,
-            verified_state_root: init.verified_state_root.into(),
-            nori_bridge_vk: init.nori_bridge_vk.into(),
-            latest_helios_store_input_hash: init.latest_helios_store_input_hash.into(),
-            eth_proof_queue_address: init.eth_proof_queue_address.into(),
-            eth_token_bridge_address: init.eth_token_bridge_address.into(),
-            queue_cursor: init.queue_cursor,
-            window_index: 0u8,
-            window_buffer: [ProofRequestRootEntry::default(); MAX_PROOF_USAGE_WINDOW],
-        }
-    }
 }
 
 impl NoriSolTokenBridge {
