@@ -1,0 +1,30 @@
+[package]
+name = "proof-submitter"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+token = { path = "../programs/token" }
+sp1-solana = { git = "https://github.com/Nori-zk/sp1-solana", branch = "feat/sp1-v6-groth16-master-typed" }
+nori-sp1-helios-primitives = { git = "https://github.com/Nori-zk/nori-bridge-head", branch = "FEAT/solana-bridge" }
+alloy-primitives = { version = "1.7.1", features = ["borsh"] }
+anchor-lang = "1.1.2"
+anchor-spl = "1.1.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+dotenvy = "0.15"
+log = "0.4"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+solana-rpc-client = "3.1"
+solana-rpc-client-api = "3.1"
+solana-keypair = "3.0.1"
+solana-message = "3.0.1"
+solana-signer = "3.0.0"
+solana-transaction = "3.0.2"
+solana-compute-budget-interface = "3.1"
+
+[dev-dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

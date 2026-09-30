@@ -1,6 +1,7 @@
 [workspace]
 members = [
-    "programs/*"
+    "programs/*",
+    "proof-submitter",
 ]
 resolver = "2"
 
