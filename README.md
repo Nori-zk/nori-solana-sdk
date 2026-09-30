@@ -63,7 +63,7 @@ erDiagram
 
 | Account | Seeds | Contents | Created in |
 |---|---|---|---|
-| Bridge state | `[b"STATE"]` | head, roots, cursors, vkey hash, ring buffer — 5 569 bytes | `initialize` |
+| Bridge state | `[b"STATE"]` | head, roots, cursors, vkey hash, ring buffer — 5 576 bytes, zero-copy | `initialize` |
 | Token mint | `[b"NETH"]` | SPL mint; mint & freeze authority = state PDA | `initialize` |
 | Minted-so-far | `[b"STORAGE", recipient]` | one `u64` per recipient — 16 bytes | `mint`, first claim per recipient |
 
@@ -81,18 +81,29 @@ erDiagram
 ## Build & test
 
 ```bash
-anchor build                                  # .so for the token program
-anchor program deploy target/deploy/token.so  # cluster from Anchor.toml (localnet)
-cargo test -p token                           # LiteSVM tests; loads target/deploy/token.so
-cargo doc --open                              # API docs from rustdoc
+# .so for the token program (CFLAGS points ring's C build at the
+# platform-tools freestanding headers)
+CFLAGS="-isystem $HOME/.cache/solana/v1.54/platform-tools/llvm/sbpf/include" \
+    cargo build-sbf --manifest-path programs/token/Cargo.toml
+
+cargo test          # surfpool-backed suites; boots a validator per test
+cargo doc --open    # API docs from rustdoc
 ```
 
-Setup: [DEVELOPMENT_GUIDE.md](DEVELOPMENT_GUIDE.md).
+Tests require `surfpool` and the `solana` CLI on PATH, and the `.so` built
+first. Setup: [DEVELOPMENT_GUIDE.md](DEVELOPMENT_GUIDE.md).
 
-Known build issue: the SBF build currently fails because alloy 1.8 crates
-(pulled in via helios 0.11.0) require rustc ≥ 1.90 while the SBF toolchain
-has 1.89. Expected fix is downgrading alloy versions in Cargo.lock
-(`cargo update <name> --precise <older>`); not done yet.
+The SBF toolchain ships rustc 1.89, so the alloy tree is pinned to 1.6.3
+(MSRV 1.88) in Cargo.lock — the 1.7+ lines require 1.91. Transitive
+`getrandom` 0.2 is forced onto its `custom` backend in
+`programs/token/Cargo.toml`.
+
+## Crates
+
+| Crate | Contents |
+|---|---|
+| `programs/token` | The on-chain program: `initialize`, `update`, `mint` |
+| `proof-submitter` | Client crate: loads SP1 proof JSONs, submits `update` txs over RPC (`SolanaProofSubmitter`), surfpool e2e suite |
 
 ## Open items
 

@@ -24,7 +24,9 @@ baseline, scoped down for this route: one-way, lock only, no unlock path.
 | `ethereum/tasks/` | Hardhat tasks: deploy, deployTimelock, lockTokens, fee admin, previews |
 | `ethereum/test/` | Mocha tests (run via Hardhat); `test-vectors/` holds storage-layout vectors shared with the SP1 guest |
 | `ethereum/types/ethers-contracts/` | **Generated** by `hardhat compile`; committed after `stabilize-types.mjs` sorts unstable lines. Never hand-edit |
-| `programs/token/` | Anchor program: `initialize`, `mint`, `update` handlers + state |
+| `programs/token/` | Anchor program: `initialize`, `update`, `mint` + zero-copy state |
+| `proof-submitter/` | Client crate: proof-JSON loader + `SolanaProofSubmitter` (RPC `update` sender) |
+| `proof-submitter/example-proofs/` | Four chained SP1 Groth16 proofs (no deposits) used by the test suites |
 | `DEPLOYMENT.md` | Production runbook (Safe → Timelock → ETH contracts → Solana program) |
 | `DEVELOPMENT_GUIDE.md` | Toolchain setup (Solana CLI, Anchor, Surfpool) |
 
@@ -36,18 +38,28 @@ npm ci
 npm test                    # ETH_NETWORK=hardhat hardhat test → 126 passing
 npm run typecheck           # tsc --noEmit → clean
 npm run build               # compile + stabilize-types + tsc -p tsconfig.package.json
-cargo check -p token        # from repo root; native check of the Solana program → clean
+
+cd ..   # repo root
+CFLAGS="-isystem $HOME/.cache/solana/v1.54/platform-tools/llvm/sbpf/include" \
+    cargo build-sbf --manifest-path programs/token/Cargo.toml   # → target/deploy/token.so
+cargo test                # surfpool suites (needs surfpool + solana CLI on PATH)
+cargo clippy --workspace --all-targets   # clean
+cargo fmt --all --check                  # clean
 ```
 
-## Commands that do NOT work today (known, not your fault)
+## Build quirks that cost hours
 
-- `anchor build` — alloy 1.8 crates (via helios 0.11.0) require rustc ≥ 1.90;
-  the SBF toolchain ships 1.89. Intended fix: downgrade alloy versions in
-  `Cargo.lock` (`cargo update <name> --precise <older>`), not done yet.
-- `cargo test -p token` — the LiteSVM test `include_bytes!`s
-  `target/deploy/token.so`, which only `anchor build` produces. Blocked by
-  the above. Host-side `cargo check -p token --tests` passes except for that
-  missing artifact.
+- **Alloy MSRV**: the SBF toolchain ships rustc 1.89; alloy 1.7+ requires
+  1.91. Cargo.lock pins the alloy tree to 1.6.3 (MSRV 1.88). Do not
+  `cargo update` the alloy crates past that without an SBF toolchain bump.
+- **getrandom 0.2** (via rand_core ← k256/bls12_381) has no backend cfg for
+  the sbpf target; `programs/token/Cargo.toml` forces its `custom` feature,
+  which unifies across the graph. Nothing on-chain calls getrandom.
+- **ring** (via ethereum_hashing ← tree_hash) compiles C with the platform
+  clang and needs the freestanding headers passed via `CFLAGS` (above).
+- The stack analyzer in `cargo build-sbf` prints "Error: Function …
+  overflows the maximum allowed frame space" for dead third-party code
+  (ring::rsa, crossbeam). Only frames in `token::*` matter.
 
 ## Invariants that bite if broken
 
@@ -64,6 +76,12 @@ cargo check -p token        # from repo root; native check of the Solana program
 - The bridge pins `proofQueue` as an immutable with no setter; the Solana
   side pins the same two addresses at `initialize`. Both sides move together
   or not at all.
+- `NoriSolTokenBridge` is a **zero-copy** account (`AccountLoader`, 5 576
+  bytes with explicit `_padding`): the struct must stay `Pod` — fixed-size
+  fields only, no Borsh/Vec. Instantiating it on stack blows the 4 KB SBF
+  frame; `initialize` writes fields into the zeroed account one by one.
+- `update`'s state account must stay `mut` — `load_mut()` rejects read-only
+  accounts with `AccountNotMutable`.
 
 ## Known open items (also in README.md)
 

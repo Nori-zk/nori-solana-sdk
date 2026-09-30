@@ -132,13 +132,15 @@ the SP1 vkey and freeze them.
 ## 5. Build and deploy the Solana program
 
 ```bash
-anchor build
-anchor program deploy target/deploy/token.so   # --provider.cluster per target
+CFLAGS="-isystem $HOME/.cache/solana/v1.54/platform-tools/llvm/sbpf/include" \
+    cargo build-sbf --manifest-path programs/token/Cargo.toml
+solana program deploy target/deploy/token.so   # --url per target cluster
 ```
 
-> Known blocker: the SBF build currently fails — alloy 1.8 crates (via
-> helios 0.11.0) need rustc ≥ 1.90 while the SBF toolchain ships 1.89. See
-> README.md "Known build issue". Resolve before any deploy.
+> The alloy tree is pinned to 1.6.3 in Cargo.lock because the SBF toolchain
+> ships rustc 1.89 (alloy 1.7+ requires 1.91). The `CFLAGS` line points
+> ring's C build at the platform-tools freestanding headers. Both are also
+> noted in README.md.
 
 ### Record
 
@@ -164,6 +166,7 @@ Init values (`NoriSolTokenBridgeInit`):
 | `latest_helios_store_input_hash` | §4 `initialStoreHash`   |
 | `eth_proof_queue_address`      | §3 `EthQueue`             |
 | `eth_token_bridge_address`     | §3 `EthBridge`            |
+| `latest_head`                  | beacon slot at the start point — the first `update` must resume from it |
 | `queue_cursor`                 | §4 `initialQueueCursor`   |
 
 The transaction payer becomes `authority` in the stored state. `update` is
@@ -248,13 +251,13 @@ pub struct NoriSolTokenBridgeInit {
     pub latest_helios_store_input_hash: B256,
     pub eth_proof_queue_address: Address,
     pub eth_token_bridge_address: Address,
+    pub latest_head: u64,
     pub queue_cursor: u64,
 }
 ```
 
 ## Appendix B — Open tooling gaps
 
-- [ ] Initialize CLI / script for the Solana program (§6).
+- [ ] Initialize CLI / script for the Solana program (§6); until then,
+      `SolanaProofSubmitter::build_initialize_instruction` covers it.
 - [ ] Dry-run script proposing a no-op admin call through the Timelock (§7.2).
-- [ ] SBF build fix: pin alloy crates below 1.8 in Cargo.lock so
-      `anchor build` works with the SBF toolchain's rustc 1.89 (§5).
