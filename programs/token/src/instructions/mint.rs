@@ -2,10 +2,11 @@ use alloy_primitives::{hex, Address};
 use anchor_lang::prelude::*;
 use anchor_spl::associated_token::{self, AssociatedToken};
 use anchor_spl::token_interface::{mint_to, Mint as Token, MintTo, TokenInterface};
+use solana_sha256_hasher::hash;
 
 use crate::{
-    constants::*, deposit_witness::VerifiedRequestWitnessInput, scram::verify_commitment,
-    scram::SCRAMWitness, state::NoriSolTokenAccountStorage, state::NoriSolTokenBridge,
+    constants::*, deposit_witness::VerifiedRequestWitnessInput,
+    state::NoriSolTokenAccountStorage, state::NoriSolTokenBridge,
 };
 
 #[error_code]
@@ -18,6 +19,8 @@ pub enum MintError {
     ZeroMintAmount,
     #[msg("Locked amount does not fit in a u64 token amount")]
     LockedAmountOverflow,
+    #[msg("Recipient pubkey does not hash to the deposit commitment")]
+    CommitmentMismatch,
 }
 
 #[event]
@@ -54,10 +57,6 @@ pub struct Mint<'info> {
     #[account(mut, seeds = [NORI_SOL_TOKEN_ACCOUNT_STORAGE_SEED, recipient.key().as_ref()], bump)]
     pub token_account_storage: UncheckedAccount<'info>,
 
-    /// CHECK: validated via address constraint against the instructions sysvar id
-    #[account(address = solana_instructions_sysvar::ID)]
-    pub instructions_sysvar: UncheckedAccount<'info>,
-
     pub system_program: Program<'info, System>,
     pub token_program: Interface<'info, TokenInterface>,
     pub associated_token_program: Program<'info, AssociatedToken>,
@@ -68,39 +67,25 @@ pub struct Mint<'info> {
 /// # Arguments
 ///
 /// * `ctx` - Accounts for the mint: bridge `state`, the token mint, the
-///   recipient's associated token account (created here if absent), and the
-///   instructions sysvar used for Ed25519 introspection below.
+///   recipient's associated token account (created here if absent).
 /// * `deposit_witness` - The Merkle witness proving a `VerifiedRequest` leaf
 ///   (target, collection keys, locked value) is present at `index` in the
 ///   deposit tree, resolving to a root via [`VerifiedRequestWitnessInput::root`].
-/// * `scram_witness` - The signature and message claimed to open the SCRAM
-///   commitment stored in the deposit leaf's first collection key, checked by
-///   [`verify_commitment`].
-/// * `ed25519_instruction_index` - The position, within this transaction's own
-///   instruction list, of the client-supplied Ed25519 signature-verification
-///   instruction that `scram_witness` is checked against. Solana's Ed25519
-///   program is not invoked via CPI and returns nothing a caller can read
-///   directly; instead the client includes a separate Ed25519 instruction
-///   alongside this one in the same transaction, and this program reads that
-///   sibling instruction's raw data back through the instructions sysvar to
-///   confirm it covers the exact `(signature, publicKey, message)` triple
-///   being claimed here. The client places that instruction when building the
-///   transaction and so knows its index directly; the program has no way to
-///   discover it on its own short of an unbounded scan of every instruction
-///   in the transaction.
+///
+/// The deposit leaf's first collection key is the commitment
+/// `sha256(recipient_pubkey)` placed by the depositor on Ethereum. Claiming
+/// requires no witness beyond the recipient's own signature on the
+/// transaction: the program re-hashes the `recipient` signer key and compares
+/// it against the committed key. The recipient stays hidden on Ethereum until
+/// the first claim (hash preimage), and only the holder of the recipient key
+/// can ever claim.
 ///
 /// # Errors
 ///
 /// Returns a [`MintError`] if the deposit leaf's target does not match the
-/// bridge's configured token bridge address, or an error from
-/// [`verify_commitment`] if the Ed25519 verification is missing, mismatched,
-/// or the signature does not hash to the claimed commitment.
-pub fn handle_mint(
-    ctx: Context<Mint>,
-    deposit_witness: VerifiedRequestWitnessInput,
-    scram_witness: SCRAMWitness,
-    ed25519_instruction_index: u16,
-) -> Result<()> {
+/// bridge's configured token bridge address, or if `sha256(recipient)` does
+/// not equal the leaf's first collection key.
+pub fn handle_mint(ctx: Context<Mint>, deposit_witness: VerifiedRequestWitnessInput) -> Result<()> {
     // ================================================================
     // Setup accounts
     // ================================================================
@@ -169,14 +154,19 @@ pub fn handle_mint(
             error!(MintError::NotTokenBridgeRequest)
         })?;
 
-    verify_commitment(
-        request.collection_keys[0].0,
-        &scram_witness.signature,
-        &ctx.accounts.recipient.key(),
-        &scram_witness.message,
-        &ctx.accounts.instructions_sysvar.to_account_info(),
-        ed25519_instruction_index,
-    )?;
+    // The deposit committed to sha256(recipient_pubkey). The recipient is a
+    // required signer, so a matching hash proves the claimant holds the key.
+    let recipient_commitment = hash(ctx.accounts.recipient.key().as_ref()).to_bytes();
+    (request.collection_keys[0].0 == recipient_commitment)
+        .then_some(())
+        .ok_or_else(|| {
+            msg!(
+                "Commitment mismatch: leaf commits to 0x{}, sha256(recipient) is 0x{}",
+                hex::encode(request.collection_keys[0].0),
+                hex::encode(recipient_commitment)
+            );
+            error!(MintError::CommitmentMismatch)
+        })?;
 
     msg!("deposit slot root verified: {:?}", root);
 
@@ -235,7 +225,7 @@ pub fn handle_mint(
                 to: ctx.accounts.token_account.to_account_info(),
                 // Mint authority is the state PDA (set at initialize): sign the
                 // CPI with its seeds so only this instruction — after the
-                // deposit and SCRAM checks above — can mint.
+                // deposit and commitment checks above — can mint.
                 authority: ctx.accounts.state.to_account_info(),
             },
         )

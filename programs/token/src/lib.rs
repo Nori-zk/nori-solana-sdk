@@ -1,7 +1,6 @@
 pub mod constants;
 pub mod error;
 pub mod instructions;
-pub mod scram;
 pub mod state;
 pub mod deposit_witness;
 pub mod request_leaf_hash;
@@ -28,19 +27,13 @@ pub mod token {
         crate::instructions::update::handle_update(ctx, proof)
     }
 
-    /// Mint bridged tokens against a proven deposit (Merkle witness) and the
-    /// SCRAM opening of the deposit's code challenge.
+    /// Mint bridged tokens against a proven deposit (Merkle witness). The
+    /// deposit's first collection key commits to sha256(recipient_pubkey);
+    /// the recipient claims by signing the transaction.
     pub fn mint(
         ctx: Context<Mint>,
         deposit_witness: deposit_witness::VerifiedRequestWitnessInput,
-        scram_witness: scram::SCRAMWitness,
-        ed25519_instruction_index: u16,
     ) -> Result<()> {
-        crate::instructions::mint::handle_mint(
-            ctx,
-            deposit_witness,
-            scram_witness,
-            ed25519_instruction_index,
-        )
+        crate::instructions::mint::handle_mint(ctx, deposit_witness)
     }
 }

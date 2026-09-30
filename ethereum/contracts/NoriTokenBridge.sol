@@ -71,7 +71,7 @@ contract NoriTokenBridge is ReentrancyGuard {
     address public bridgeOperator;
 
     // lifetimeLockedByDepositor
-    // Solana signature hash -> Bridge units locked amount
+    // Solana recipient commitment (sha256 of pubkey) -> Bridge units locked amount
     mapping(uint256 => uint256) public lockedTokens;
 
     // Total locked supply in bridge units
@@ -152,7 +152,7 @@ contract NoriTokenBridge is ReentrancyGuard {
     // -------------------------------
     // Lock ETH for a Solana account
     // -------------------------------
-    // codeChallenge is the hash of the Solana signature
+    // codeChallenge is sha256 of the Solana recipient's pubkey
     function lockTokens(uint256 codeChallenge) external payable {
         // ===============================
         // VALIDATION

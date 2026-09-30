@@ -9,9 +9,9 @@ import {
 import hre from "hardhat";
 const { ethers } = await hre.network.getOrCreate();
 
-// In production the codeChallenge is a SCRAM commitment, sha256(ed25519
-// signature), so it spans the full 256-bit range. A uniform random 32-byte
-// value matches that distribution.
+// In production the codeChallenge is sha256 of a Solana pubkey, so it spans
+// the full 256-bit range. A uniform random 32-byte value matches that
+// distribution.
 const codeChallengeBytes = new Uint8Array(32);
 getRandomValues(codeChallengeBytes);
 const codeChallengeBigInt = codeChallengeBytes.reduce(
@@ -632,8 +632,8 @@ describe("NoriTokenBridge", () => {
         await deployTokenBridgeFixture();
       const lockValue = ethers.parseEther("1.0");
 
-      // SCRAM commitments are sha256 outputs, so both extremes are valid;
-      // no field-prime bound applies on this route.
+      // Commitments are sha256 outputs, so both extremes are valid; no
+      // field-prime bound applies on this route.
       for (const codeChallenge of [0n, 2n ** 256n - 1n]) {
         await tokenBridge
           .connect(user1)

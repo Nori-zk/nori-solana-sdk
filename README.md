@@ -44,8 +44,8 @@ erDiagram
 ```
 
 1. Users lock tokens in the ETH bridge contract. Deposit keys are
-   `sha256(Ed25519 signature)` (SCRAM commitments) — the signature itself is
-   not revealed on Ethereum.
+   `sha256(recipient_pubkey)` commitments — the Solana recipient is not
+   revealed on Ethereum.
 2. nori-bridge-head proves Ethereum consensus and execution state and folds
    the pending deposit requests into a Merkle root. The proof's public
    values are a Borsh `ProofOutputs`: slots, state root, store hash, queue
@@ -55,9 +55,9 @@ erDiagram
    slot, store-hash chain, forward progress), advances the bridge state,
    and appends the deposit root to a 96-entry ring buffer.
 4. `mint` — the claimant proves their deposit is in a recorded root (Merkle
-   witness), opens the SCRAM commitment by revealing the signature (checked
-   against the native ed25519 precompile instruction in the same
-   transaction), and receives `locked_so_far - minted_so_far` tokens.
+   witness) and signs with the recipient key; the program checks
+   `sha256(recipient)` against the committed deposit key and mints
+   `locked_so_far - minted_so_far` tokens.
 
 ## Accounts
 
@@ -99,6 +99,4 @@ has 1.89. Expected fix is downgrading alloy versions in Cargo.lock
 - `mint` does not yet check the witness root against the ring buffer, so
   deposit membership is not verified. Waiting on a real proof to test
   against.
-- SCRAM binds the ETH-side signer's ed25519 key to the Solana recipient
-  key; this coupling is under review and may be redesigned.
 - Ring buffer has no expiry beyond overwrite after 96 updates.

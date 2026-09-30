@@ -111,7 +111,7 @@ Requires:
 
 `npm run test:lock <codeChallengeHex> <amountInETH (min 0.001, max 0.005, defaults to 0.001)>`
 
-The code challenge is the SCRAM commitment, `sha256(ed25519 signature)`, that the Solana recipient later reveals to mint.
+The code challenge is `sha256` of the Solana recipient's pubkey; the recipient claims the mint by signing with that key.
 
 e.g. `npm run test:lock 0x1edc891c0ea28b6157e8460304e20a534f3b29a9dbb2d499a58fa2d1de6b3c4a 0.001`
 
