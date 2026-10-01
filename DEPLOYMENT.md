@@ -162,7 +162,6 @@ Init values (`NoriSolTokenBridgeInit`):
 | Field                          | Source                    |
 | ------------------------------ | ------------------------- |
 | `verified_state_root`          | §4 `initialVerifiedStateRoot` |
-| `nori_bridge_vk`               | §4 `noriBridgeVk`         |
 | `latest_helios_store_input_hash` | §4 `initialStoreHash`   |
 | `eth_proof_queue_address`      | §3 `EthQueue`             |
 | `eth_token_bridge_address`     | §3 `EthBridge`            |
@@ -247,7 +246,6 @@ constructor(
 // programs/token/src/state.rs
 pub struct NoriSolTokenBridgeInit {
     pub verified_state_root: B256,
-    pub nori_bridge_vk: B256,
     pub latest_helios_store_input_hash: B256,
     pub eth_proof_queue_address: Address,
     pub eth_token_bridge_address: Address,

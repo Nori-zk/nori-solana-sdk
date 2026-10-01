@@ -32,6 +32,7 @@ getrandom = { version = "0.2", features = ["custom"] }
 solana-sha256-hasher = "3.1.0"
 sp1-solana = { git = "https://github.com/Nori-zk/sp1-solana", branch = "feat/sp1-v6-groth16-master-typed" }
 nori-sp1-helios-primitives = { git = "https://github.com/Nori-zk/nori-bridge-head", branch = "FEAT/solana-bridge" }
+nori-elf = { git = "https://github.com/Nori-zk/nori-bridge-head", branch = "FEAT/solana-bridge" }
 
 [dev-dependencies]
 serde_json = "1"

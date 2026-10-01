@@ -73,8 +73,9 @@ struct BufferSection {
 pub struct LoadedProof {
     /// Instruction argument for the program's `update` entrypoint.
     pub wire: SP1Groth16Proof,
-    /// `public_inputs[0]` — the SP1 program vkey hash (`vk.bytes32()`), to be
-    /// pinned as `nori_bridge_vk` at `initialize`.
+    /// `public_inputs[0]` — the SP1 program vkey hash (`vk.bytes32()`); must
+    /// equal the `nori_bridge_vk` that `initialize` pins from
+    /// `nori-bridge-head/nori-elf`.
     pub program_vkey: [u8; 32],
 }
 
@@ -89,9 +90,8 @@ impl LoadedProof {
 
     /// `initialize` arguments that make THIS proof a valid first update: the
     /// bridge resumes from the proof's own input side (slot, store hash,
-    /// queue cursor), pins its queue address, and trusts its proving program
-    /// (`program_vkey`). This proof (or its chain successor) is then the
-    /// first valid `update`.
+    /// queue cursor) and pins its queue address. This proof (or its chain
+    /// successor) is then the first valid `update`.
     ///
     /// `verified_state_root` is the execution state root at the start point;
     /// it is not part of update-continuity checks.
@@ -103,7 +103,6 @@ impl LoadedProof {
         let outputs = self.outputs()?;
         Ok(token::state::NoriSolTokenBridgeInit {
             verified_state_root,
-            nori_bridge_vk: alloy_primitives::B256::from(self.program_vkey),
             latest_helios_store_input_hash: outputs.input_store_hash,
             eth_proof_queue_address: outputs.proof_request_queue_address,
             eth_token_bridge_address,

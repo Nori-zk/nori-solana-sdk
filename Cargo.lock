@@ -3275,9 +3275,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nori-elf"
+version = "0.1.0"
+source = "git+https://github.com/Nori-zk/nori-bridge-head?branch=FEAT%2Fsolana-bridge#512ed497630efbb7186dd97d8c36ae451e80851c"
+
+[[package]]
 name = "nori-hash"
 version = "0.1.0"
-source = "git+https://github.com/Nori-zk/nori-bridge-head?branch=FEAT%2Fsolana-bridge#6d6af843dc0288cd6f427841ec26417a3f9a6580"
+source = "git+https://github.com/Nori-zk/nori-bridge-head?branch=FEAT%2Fsolana-bridge#512ed497630efbb7186dd97d8c36ae451e80851c"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
@@ -3293,7 +3298,7 @@ dependencies = [
 [[package]]
 name = "nori-sp1-helios-primitives"
 version = "0.1.0"
-source = "git+https://github.com/Nori-zk/nori-bridge-head?branch=FEAT%2Fsolana-bridge#6d6af843dc0288cd6f427841ec26417a3f9a6580"
+source = "git+https://github.com/Nori-zk/nori-bridge-head?branch=FEAT%2Fsolana-bridge#512ed497630efbb7186dd97d8c36ae451e80851c"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
@@ -6240,6 +6245,7 @@ dependencies = [
  "anchor-spl",
  "bytemuck",
  "getrandom 0.2.17",
+ "nori-elf",
  "nori-sp1-helios-primitives",
  "serde_json",
  "solana-keypair",

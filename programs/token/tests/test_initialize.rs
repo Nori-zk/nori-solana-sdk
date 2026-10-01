@@ -126,7 +126,6 @@ async fn test_initialize() {
     // the proof-submitter suite).
     let init_values = NoriSolTokenBridgeInit {
         verified_state_root: B256::from([1u8; 32]),
-        nori_bridge_vk: B256::from([2u8; 32]),
         latest_helios_store_input_hash: B256::from([3u8; 32]),
         eth_proof_queue_address: Address::from([4u8; 20]),
         eth_token_bridge_address: Address::from([5u8; 20]),
@@ -199,7 +198,7 @@ async fn test_initialize() {
     );
     assert_eq!(
         state_state.nori_bridge_vk,
-        <[u8; 32]>::from(init_values.nori_bridge_vk)
+        nori_elf::NORI_SP1_HELIOS_PROGRAM_VK
     );
     assert_eq!(
         state_state.latest_helios_store_input_hash,

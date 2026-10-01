@@ -24,7 +24,8 @@ Wire format, from the proof JSON fields:
 - `wire.sp1_public_inputs` — `public_values.buffer.data`, the 220-byte
   Borsh `ProofOutputs`.
 - `program_vkey` — `public_inputs[0]` (decimal), the SP1 program vkey
-  hash to pin as `nori_bridge_vk` at `initialize`.
+  hash; must equal the `nori_bridge_vk` that `initialize` pins from
+  `nori-bridge-head/nori-elf`.
 
 ## Submitting
 
@@ -46,7 +47,7 @@ Wire format, from the proof JSON fields:
   init values come from the first proof:
   `proofs[0].bridge_init(verified_state_root, eth_token_bridge_address)`,
   which resumes the bridge from the proof's input side (slot, store hash,
-  queue cursor) and pins its queue address and `program_vkey`.
+  queue cursor) and pins its queue address.
 - `submit_update(&proof.wire).await` — sends and confirms the
   transaction, returns `SolanaTransactionResult { tx_hash }`.
 

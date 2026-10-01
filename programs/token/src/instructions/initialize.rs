@@ -39,16 +39,10 @@ pub fn handle_initialize(
     ctx: Context<Initialize>,
     init_values: NoriSolTokenBridgeInit,
 ) -> Result<()> {
-    let mut state = ctx.accounts.state.load_init()?;
-    state.authority = ctx.accounts.payer.key();
-    state.latest_head = init_values.latest_head;
-    state.verified_state_root = init_values.verified_state_root.into();
-    state.nori_bridge_vk = init_values.nori_bridge_vk.into();
-    state.latest_helios_store_input_hash = init_values.latest_helios_store_input_hash.into();
-    state.eth_proof_queue_address = init_values.eth_proof_queue_address.into();
-    state.eth_token_bridge_address = init_values.eth_token_bridge_address.into();
-    state.queue_cursor = init_values.queue_cursor;
-    state.window_index = 0;
+    ctx.accounts
+        .state
+        .load_init()?
+        .apply_init((init_values, ctx.accounts.payer.key()));
 
     msg!("NoriSolTokenBridge initialized");
 

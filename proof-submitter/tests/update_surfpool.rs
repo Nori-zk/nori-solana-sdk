@@ -34,7 +34,6 @@ const BLOCK_1: u64 = 11_808_937;
 
 // Anchor custom error codes: 6000 + UpdateError variant index, as they
 // appear in RPC error text ("custom program error: 0x1774").
-const ERR_PROOF_VERIFICATION_FAILED: u32 = 6000;
 const ERR_QUEUE_ADDRESS_MISMATCH: u32 = 6002;
 const ERR_INPUT_SLOT_MISMATCH: u32 = 6004;
 
@@ -323,12 +322,4 @@ async fn update_with_wrong_queue_address_fails() {
     let proofs = load_proofs();
     let code = expect_custom_error(h.submitter.submit_update(&proofs[0].wire).await);
     assert_eq!(code, ERR_QUEUE_ADDRESS_MISMATCH);
-}
-
-#[tokio::test]
-async fn update_with_wrong_program_vkey_fails() {
-    let h = setup_with(|init| init.nori_bridge_vk = B256::from([0xAAu8; 32])).await;
-    let proofs = load_proofs();
-    let code = expect_custom_error(h.submitter.submit_update(&proofs[0].wire).await);
-    assert_eq!(code, ERR_PROOF_VERIFICATION_FAILED);
 }
