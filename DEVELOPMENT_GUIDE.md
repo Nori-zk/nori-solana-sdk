@@ -192,3 +192,9 @@ solana balance
 ```
 10002 SOL
 ```
+
+# Install specific SBF build version
+
+```
+cargo build-sbf --install-only --force-tools-install --tools-version v1.54
+```
