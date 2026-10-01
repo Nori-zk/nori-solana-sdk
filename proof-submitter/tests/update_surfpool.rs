@@ -271,10 +271,17 @@ async fn submit_update_series() {
     let proofs = load_proofs();
     let heads = [SLOT_1, SLOT_2, SLOT_3, SLOT_4];
     for (i, proof) in proofs.iter().enumerate() {
-        h.submitter
+        let result = h
+            .submitter
             .submit_update(&proof.wire)
             .await
             .unwrap_or_else(|e| panic!("update {i} failed: {e}"));
+        // CU tripwire: measured ~103.4k; the submitter budgets 200k.
+        let cu = result
+            .cu_consumed
+            .expect("local validator serves compute_units_consumed");
+        println!("update[{i}]: {cu} CU");
+        assert!(cu < 200_000, "update CU usage approaches the budget");
         let state = read_state(&h).await;
         assert_eq!(state.latest_head, heads[i]);
         assert_eq!(state.window_index as usize, i + 1);

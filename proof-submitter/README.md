@@ -34,8 +34,8 @@ Wire format, from the proof JSON fields:
   picked up via dotenvy.
 - `new(rpc_url, payer, program_id)` — explicit construction.
 - `build_update_instructions(&proof.wire)` — the `update` instruction
-  plus a 1.4M compute-unit-limit instruction (Groth16 verification is
-  the dominant cost; unused units are not charged).
+  plus a 200k compute-unit-limit instruction (measured ~103.4k CU per
+  update; unused units are not charged).
 - `deploy_program(&program_keypair, &so_bytes).await` — deploys a compiled
   program via the upgradeable loader (create buffer → chunked writes →
   deploy). Dev/test convenience: sequential, no resume. Production deploys

@@ -13,22 +13,33 @@ use solana_keypair::Keypair;
 use solana_loader_v3_interface::{instruction as loader_v3, state::UpgradeableLoaderState};
 use solana_message::{Message, VersionedMessage};
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
+use solana_signature::Signature;
 use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
+use solana_transaction_status_client_types::{
+    option_serializer::OptionSerializer, UiTransactionEncoding,
+};
 use sp1_solana::SP1Groth16Proof;
 use std::str::FromStr;
 
 /// Groth16 verification is the dominant cost; cap the budget so the
-/// transaction is never CU-starved (unused units are not charged).
-const UPDATE_COMPUTE_UNIT_LIMIT: u32 = 1_400_000;
+/// transaction is never CU-starved (unused units are not charged). Measured
+/// at ~103.4k CU per update (surfpool e2e, 2026-09); 200k is ~2x margin.
+const UPDATE_COMPUTE_UNIT_LIMIT: u32 = 200_000;
 
 /// Program bytes are written one chunk per transaction; sized so a write
 /// plus its accounts fits a legacy transaction (same ballpark the CLI uses).
 const BUFFER_WRITE_CHUNK_LEN: usize = 1_012;
 
+/// Minimal result; mirrors the mock shape from the bridge-head side so
+/// call sites can swap implementations.
 #[derive(Debug, Clone)]
 pub struct SolanaTransactionResult {
+    /// Transaction signature.
     pub tx_hash: String,
+    /// Compute units the transaction consumed (best-effort fetch from the
+    /// confirmed transaction's meta; `None` when the RPC doesn't serve it).
+    pub cu_consumed: Option<u64>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -249,14 +260,32 @@ impl SolanaProofSubmitter {
         let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &signers)
             .map_err(|e| SubmitterError::TransactionBuild(e.to_string()))?;
         let signature = client.send_and_confirm_transaction(&tx).await?;
+        let cu_consumed = fetch_cu_consumed(&client, &signature).await;
         log::info!(
-            "submitted Nori {what} tx {} through {}",
+            "submitted Nori {what} tx {} through {} ({} CU)",
             signature,
-            self.rpc_url
+            self.rpc_url,
+            cu_consumed
+                .map(|cu| cu.to_string())
+                .unwrap_or_else(|| "?".into())
         );
         Ok(SolanaTransactionResult {
             tx_hash: signature.to_string(),
+            cu_consumed,
         })
+    }
+}
+
+/// Fetch the compute units a confirmed transaction consumed. Best-effort:
+/// returns `None` if the meta is unavailable or the RPC errors.
+async fn fetch_cu_consumed(client: &RpcClient, signature: &Signature) -> Option<u64> {
+    let tx = client
+        .get_transaction(signature, UiTransactionEncoding::Json)
+        .await
+        .ok()?;
+    match tx.transaction.meta?.compute_units_consumed {
+        OptionSerializer::Some(cu) => Some(cu),
+        _ => None,
     }
 }
 
