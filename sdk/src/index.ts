@@ -11,8 +11,9 @@ export {
     getEthStateTopic$,
 } from './rx/topics.js';
 export { getBridgeStateWithTimings$ } from './rx/state.js';
+export { getBridgeSocketWithConnectivity$ } from './rx/connectivity.js';
 export {
     BridgeSocketConnectivityGraph,
-    createBridgeSocketConnectivityMachine,
-    getBridgeSocketWithConnectivity$,
-} from './rx/connectivity.js';
+    type BridgeSocketConnectionState,
+} from './rx/ystate/connectivity.js';
+export { createBridgeSocketConnectivityMachine } from './rx/ystate/connectivity.impl.js';
