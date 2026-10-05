@@ -7,7 +7,7 @@ use crate::{constants::*, state::*};
 pub struct Initialize<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
-    // init via CPI is fine here: 5 576 bytes is under the 10 KiB CPI
+    // init via CPI is fine here: 200 bytes is under the 10 KiB CPI
     // creation limit; the loader then initializes the zero-copy state in
     // place (see state.rs).
     #[account(

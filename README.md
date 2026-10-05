@@ -15,7 +15,7 @@ syscalls.
 erDiagram
     BRIDGE_STATE ||--|| TOKEN_MINT : "is mint authority of"
     BRIDGE_STATE ||--o{ MINTED_STORAGE : "one per claimant"
-    BRIDGE_STATE ||--|{ RING_ENTRY : "ring buffer of 96"
+    BRIDGE_STATE ||--o{ PROOF_QUEUE_BATCH : "one per non-empty batch, append-only"
 
     BRIDGE_STATE {
         pubkey authority
@@ -26,10 +26,9 @@ erDiagram
         bytes20 eth_proof_queue_address
         bytes20 eth_token_bridge_address
         u64 queue_cursor
-        u8 window_index
-        ring_entry_x96 window_buffer
+        u64 proof_queue_batch_count
     }
-    RING_ENTRY {
+    PROOF_QUEUE_BATCH {
         bytes32 root
         u64 output_block_number
         u64 input_queue_cursor
@@ -52,27 +51,48 @@ erDiagram
    cursors, deposit-request root.
 3. `update` — permissionless — verifies the Groth16 proof against the vkey
    hash stored at `initialize`, enforces continuity (queue cursor, head
-   slot, store-hash chain, forward progress), advances the bridge state,
-   and appends the deposit root to a 96-entry ring buffer.
-4. `mint` — the claimant proves their deposit is in a recorded root (Merkle
-   witness) and signs with the recipient key; the program checks
-   `sha256(recipient)` against the committed deposit key and mints
-   `locked_so_far - minted_so_far` tokens.
+   slot, store-hash chain, forward progress) and advances the bridge state.
+   When the proof's batch drained at least one request, it also records the
+   batch's root and cursor range in a new proof queue batch account at the
+   next index (`proof_queue_batch_count`). Batches are append-only, so a
+   processed request stays provable forever. An update with an empty batch
+   only advances the head.
+4. `mint` — the claimant passes the proof queue batch that settled their
+   deposit and a Merkle witness that must resolve to that batch's root,
+   with the leaf index inside the batch's cursor range, and signs with the
+   recipient key; the program checks `sha256(recipient)` against the
+   committed deposit key and mints `locked_so_far - minted_so_far` tokens.
+   Clients find the batch for a request id by searching indices
+   `0..proof_queue_batch_count`: cursor ranges increase monotonically, and
+   the leaf index is `request_id - input_queue_cursor`.
 
 ## Accounts
 
 | Account | Seeds | Contents | Created in |
 |---|---|---|---|
-| Bridge state | `[b"STATE"]` | head, roots, cursors, vkey hash, ring buffer — 5 576 bytes, zero-copy | `initialize` |
+| Bridge state | `[b"STATE"]` | head, roots, cursors, vkey hash, proof queue batch count — 200 bytes, zero-copy | `initialize` |
 | Token mint | `[b"NETH"]` | SPL mint; mint & freeze authority = state PDA | `initialize` |
+| Proof queue batch | `[b"PROOF_QUEUE_BATCH", index.to_le_bytes()]` | batch root, output block number, input/output queue cursor — 64 bytes | `update`, once per non-empty batch |
 | Minted-so-far | `[b"STORAGE", recipient]` | one `u64` per recipient — 16 bytes | `mint`, first claim per recipient |
 
 ## Security model
 
 - Accepted proofs are those for the vkey hash pinned at `initialize`
-  (`nori_bridge_vk`); the signer of `update` is irrelevant.
+  (`nori_bridge_vk`); the signer of `update` only pays rent for the proof
+  queue batch account.
 - Continuity checks in `update` reject replay, skip, and fork: a proof must
   resume exactly at the stored cursor/head/store-hash and advance them.
+  Concurrent updates are serialized on the writable state account, so only
+  one can claim a given proof queue batch index.
+- `update` derives the next proof queue batch PDA from state and rejects
+  any other account. Batch and minted-so-far PDAs are created through one
+  path that tolerates the predictable address having been pre-funded
+  (top-up, allocate, assign), so sending lamports to it cannot block
+  creation.
+- `mint` only accepts a proof queue batch account owned by the program with
+  the batch discriminator — only `update` creates those — and requires the
+  witness root to equal its root and the index to fall inside its range.
+  `mint` reads the state account without write-locking it.
 - Only the program can mint: the mint authority is the state PDA, whose
   signature exists only inside `mint` after the deposit checks.
 - Per-recipient `minted_so_far` storage makes minting delta-based
@@ -104,10 +124,4 @@ The SBF toolchain ships rustc 1.89, so the alloy tree is pinned to 1.6.3
 |---|---|
 | `programs/token` | The on-chain program: `initialize`, `update`, `mint` |
 | `proof-submitter` | Client crate: loads SP1 proof JSONs, submits `update` txs over RPC (`SolanaProofSubmitter`), surfpool e2e suite |
-
-## Open items
-
-- `mint` does not yet check the witness root against the ring buffer, so
-  deposit membership is not verified. Waiting on a real proof to test
-  against.
-- Ring buffer has no expiry beyond overwrite after 96 updates.
+| `test-utils` | Surfpool test harness shared by the suites and downstream crates: validator with kill-on-drop, funded keypairs, CLI deploy, custom error codes |

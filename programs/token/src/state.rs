@@ -1,16 +1,14 @@
-use crate::constants::MAX_PROOF_USAGE_WINDOW;
 use alloy_primitives::{Address, B256};
 use anchor_lang::prelude::*;
-use bytemuck::{Pod, Zeroable};
 use nori_sp1_helios_primitives::types::ProofOutputs;
 
-// Zero-copy layout: the state account is ~5.6 KB, far past the 4 KB SBF
-// stack frame, so the struct is never instantiated on stack — handlers
-// access it by reference directly in account memory. All fields are
-// fixed-size and the explicit padding keeps the struct padding-free
-// (a bytemuck::Pod requirement).
-#[derive(Copy, Clone, Default, Pod, Zeroable)]
-#[repr(C)]
+/// One committed proof queue batch, stored append-only in its own PDA at
+/// `[NORI_SOL_TOKEN_BRIDGE_PROOF_QUEUE_BATCH_SEED, index.to_le_bytes()]`.
+/// Indices are contiguous from 0 and only updates whose batch drained at
+/// least one request create an entry, so clients can search entries by index
+/// for the batch whose cursor range covers a request id.
+#[account]
+#[derive(InitSpace)]
 pub struct ProofRequestRootEntry {
     pub root: [u8; 32],           // 32 bytes
     pub output_block_number: u64, // 8 bytes
@@ -18,6 +16,9 @@ pub struct ProofRequestRootEntry {
     pub output_queue_cursor: u64, // 8 bytes
 }
 
+// Zero-copy layout: handlers access the state by reference directly in
+// account memory. All fields are fixed-size and ordered so the struct is
+// padding-free (a bytemuck::Pod requirement).
 #[account(zero_copy)]
 #[repr(C)]
 pub struct NoriSolTokenBridge {
@@ -29,14 +30,11 @@ pub struct NoriSolTokenBridge {
     pub eth_proof_queue_address: [u8; 20],
     pub eth_token_bridge_address: [u8; 20],
     pub queue_cursor: u64,
-    pub window_index: u8,
-    pub _padding: [u8; 7],
-    pub window_buffer: [ProofRequestRootEntry; MAX_PROOF_USAGE_WINDOW],
+    pub proof_queue_batch_count: u64,
 }
 
 /// Instruction arguments for `initialize` (~120 bytes — fine on stack).
-/// Written into the zeroed state account field by field; building the whole
-/// state struct on stack first would blow the 4 KB frame.
+/// Written into the zeroed state account field by field.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct NoriSolTokenBridgeInit {
     pub verified_state_root: B256,
@@ -60,27 +58,32 @@ impl NoriSolTokenBridge {
         self.eth_proof_queue_address = init.eth_proof_queue_address.into();
         self.eth_token_bridge_address = init.eth_token_bridge_address.into();
         self.queue_cursor = init.queue_cursor;
-        self.window_index = 0u8;
+        self.proof_queue_batch_count = 0;
     }
 
-    pub fn apply_update(&mut self, outputs: &ProofOutputs) {
+    /// Applies the update's commitments. When the update's batch drained at
+    /// least one request, reserves the next proof queue batch index and
+    /// returns it with the entry the caller must store at that index's PDA;
+    /// an update with an empty batch only advances the head and returns `None`.
+    pub fn apply_update(&mut self, outputs: &ProofOutputs) -> Option<(u64, ProofRequestRootEntry)> {
         // Update commitments
         self.latest_head = outputs.output_slot;
         self.latest_helios_store_input_hash = outputs.output_store_hash.into();
         self.verified_state_root = outputs.execution_state_root.into();
         self.queue_cursor = outputs.output_queue_cursor;
 
-        // Add the proof request entry to the contract ring buffer
-        let proof_request_root_entry = ProofRequestRootEntry {
-            root: outputs.verified_requests_root.into(),
-            input_queue_cursor: outputs.input_queue_cursor,
-            output_queue_cursor: outputs.output_queue_cursor,
-            output_block_number: outputs.output_block_number,
-        };
-        self.window_buffer[self.window_index as usize] = proof_request_root_entry;
-
-        // Advance for the next update, wrapping at the end
-        self.window_index = ((self.window_index as usize + 1) % MAX_PROOF_USAGE_WINDOW) as u8;
+        // Reserve the next proof queue batch index for a non-empty batch
+        (outputs.output_queue_cursor != outputs.input_queue_cursor).then(|| {
+            let proof_queue_batch_index = self.proof_queue_batch_count;
+            self.proof_queue_batch_count += 1;
+            let proof_request_root_entry = ProofRequestRootEntry {
+                root: outputs.verified_requests_root.into(),
+                input_queue_cursor: outputs.input_queue_cursor,
+                output_queue_cursor: outputs.output_queue_cursor,
+                output_block_number: outputs.output_block_number,
+            };
+            (proof_queue_batch_index, proof_request_root_entry)
+        })
     }
 }
 

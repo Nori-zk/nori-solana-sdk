@@ -154,7 +154,7 @@ mint PDA (`[b"NETH"]`) — record the derived addresses after §6.
 
 ## 6. Initialize the Solana bridge state
 
-One `initialize` call creates the state PDA and the SPL mint (12 decimals,
+One `initialize` call creates the state PDA and the SPL mint (6 decimals,
 mint & freeze authority = state PDA) and pins the integrity constants.
 
 Init values (`NoriSolTokenBridgeInit`):
@@ -172,6 +172,12 @@ The transaction payer becomes `authority` in the stored state. `update` is
 permissionless (only a valid proof matters), so `authority` currently has no
 privileged instruction — keep it a controlled key regardless.
 
+Every `update` whose batch drains at least one proof request creates a
+proof queue batch account (`[b"PROOF_QUEUE_BATCH", index]`, 64 bytes), and
+the `update` payer funds its rent exemption (~0.0013 SOL) on top of the
+transaction fee. Updates with empty batches pay only the fee. Keep the
+submitter's payer keypair (`SOLANA_PAYER_KEYPAIR_PATH`) funded for this.
+
 > Tooling gap: no initialize CLI ships in this repo yet — invoke through a
 > script built on the generated IDL/client. Track in Appendix B.
 
@@ -179,6 +185,7 @@ privileged instruction — keep it a controlled key regardless.
 
 - [ ] Initialize tx signature
 - [ ] State PDA, mint PDA addresses
+- [ ] Submitter payer pubkey and its funding source
 
 ---
 

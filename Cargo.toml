@@ -2,6 +2,7 @@
 members = [
     "programs/*",
     "proof-submitter",
+    "test-utils",
 ]
 resolver = "2"
 
