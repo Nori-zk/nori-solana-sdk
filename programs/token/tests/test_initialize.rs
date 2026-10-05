@@ -29,10 +29,10 @@ async fn test_initialize() {
     // Initialize with dummy values (update-continuity values are covered by
     // the proof-submitter suite).
     let init_values = NoriSolTokenBridgeInit {
-        verified_state_root: B256::from([1u8; 32]),
-        latest_helios_store_input_hash: B256::from([3u8; 32]),
-        eth_proof_queue_address: Address::from([4u8; 20]),
-        eth_token_bridge_address: Address::from([5u8; 20]),
+        verified_state_root: B256::from([1u8; 32]).into(),
+        latest_helios_store_input_hash: B256::from([3u8; 32]).into(),
+        eth_proof_queue_address: Address::from([4u8; 20]).into(),
+        eth_token_bridge_address: Address::from([5u8; 20]).into(),
         latest_head: 42,
         queue_cursor: 7,
     };

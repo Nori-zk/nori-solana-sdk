@@ -31,11 +31,11 @@ const PROGRAM_SO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/depl
 const ETH_TOKEN_BRIDGE_ADDRESS: [u8; 20] = [5u8; 20];
 const LOCKED_SO_FAR: u64 = 1_000;
 
-// Anchor custom error codes: 6000 + MintError variant index; 3007 is
-// Anchor's AccountOwnedByWrongProgram.
-const ERR_PROOF_QUEUE_BATCH_ROOT_MISMATCH: u32 = 6005;
-const ERR_WITNESS_INDEX_OUTSIDE_PROOF_QUEUE_BATCH: u32 = 6006;
-const ERR_INVALID_DEPOSIT_WITNESS: u32 = 6007;
+// Anchor custom error codes: 6000 + NoriSolTokenBridgeError variant index
+// (mint's section starts at 6009); 3007 is Anchor's AccountOwnedByWrongProgram.
+const ERR_PROOF_QUEUE_BATCH_ROOT_MISMATCH: u32 = 6014;
+const ERR_WITNESS_INDEX_OUTSIDE_PROOF_QUEUE_BATCH: u32 = 6015;
+const ERR_INVALID_DEPOSIT_WITNESS: u32 = 6016;
 const ERR_ACCOUNT_OWNED_BY_WRONG_PROGRAM: u32 = 3007;
 
 struct MintHarness {
@@ -89,10 +89,10 @@ async fn setup() -> MintHarness {
     deploy_program_with_cli(&surfpool, &payer, PROGRAM_SO);
 
     let init_values = NoriSolTokenBridgeInit {
-        verified_state_root: B256::from([1u8; 32]),
-        latest_helios_store_input_hash: B256::from([3u8; 32]),
-        eth_proof_queue_address: Address::from([4u8; 20]),
-        eth_token_bridge_address: Address::from(ETH_TOKEN_BRIDGE_ADDRESS),
+        verified_state_root: B256::from([1u8; 32]).into(),
+        latest_helios_store_input_hash: B256::from([3u8; 32]).into(),
+        eth_proof_queue_address: Address::from([4u8; 20]).into(),
+        eth_token_bridge_address: Address::from(ETH_TOKEN_BRIDGE_ADDRESS).into(),
         latest_head: 42,
         queue_cursor: 0,
     };
@@ -164,10 +164,10 @@ fn deposit_witness(recipient: &Pubkey, index: u64) -> VerifiedRequestWitnessInpu
         path: vec![],
         index,
         value: VerifiedRequest {
-            target: Address::from(ETH_TOKEN_BRIDGE_ADDRESS),
+            target: Address::from(ETH_TOKEN_BRIDGE_ADDRESS).into(),
             collection_keys_count: 1,
-            collection_keys,
-            value: U256::from(LOCKED_SO_FAR),
+            collection_keys: collection_keys.map(Into::into),
+            value: U256::from(LOCKED_SO_FAR).into(),
         },
     }
 }
@@ -358,7 +358,7 @@ async fn mint_rejects_malformed_deposit_witness() {
     // A path one level deeper than MAX_TREE_DEPTH, against a batch whose
     // root it resolves to, so only witness validation rejects it.
     let mut witness = deposit_witness(&recipient.pubkey(), 0);
-    witness.path = vec![B256::ZERO; token::constants::MAX_TREE_DEPTH + 1];
+    witness.path = vec![B256::ZERO.into(); token::constants::MAX_TREE_DEPTH + 1];
     let entry = ProofRequestRootEntry {
         root: witness.root().into(),
         output_block_number: 100,

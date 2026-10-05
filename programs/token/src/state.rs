@@ -1,4 +1,4 @@
-use alloy_primitives::{Address, B256};
+use crate::idl_types::{Bytes32, EthAddress};
 use anchor_lang::prelude::*;
 use nori_sp1_helios_primitives::types::ProofOutputs;
 
@@ -37,10 +37,10 @@ pub struct NoriSolTokenBridge {
 /// Written into the zeroed state account field by field.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct NoriSolTokenBridgeInit {
-    pub verified_state_root: B256,
-    pub latest_helios_store_input_hash: B256,
-    pub eth_proof_queue_address: Address,
-    pub eth_token_bridge_address: Address,
+    pub verified_state_root: Bytes32,
+    pub latest_helios_store_input_hash: Bytes32,
+    pub eth_proof_queue_address: EthAddress,
+    pub eth_token_bridge_address: EthAddress,
     /// Beacon slot of the state the bridge starts from. The first accepted
     /// `update` must have `input_slot == latest_head`, so this pins where the
     /// proven chain resumes.

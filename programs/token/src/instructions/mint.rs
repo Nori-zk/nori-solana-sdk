@@ -1,33 +1,14 @@
-use alloy_primitives::{hex, Address, B256};
+use alloy_primitives::{hex, Address, B256, U256};
 use anchor_lang::prelude::*;
 use anchor_spl::associated_token::{self, AssociatedToken};
 use anchor_spl::token_interface::{mint_to, Mint as Token, MintTo, TokenInterface};
 use solana_sha256_hasher::hash;
 
 use crate::{
-    constants::*, deposit_witness::VerifiedRequestWitnessInput, pda::create_program_owned_pda,
-    state::NoriSolTokenAccountStorage, state::NoriSolTokenBridge, state::ProofRequestRootEntry,
+    constants::*, deposit_witness::VerifiedRequestWitnessInput, error::NoriSolTokenBridgeError,
+    pda::create_program_owned_pda, state::NoriSolTokenAccountStorage, state::NoriSolTokenBridge,
+    state::ProofRequestRootEntry,
 };
-
-#[error_code]
-pub enum MintError {
-    #[msg("VerifiedRequest is not a proof of state for the token bridge contract")]
-    NotTokenBridgeRequest,
-    #[msg("locked_so_far is less than minted_so_far; this would cause a negative mint amount")]
-    MintedExceedsLocked,
-    #[msg("No new amount to mint: locked_so_far equals minted_so_far")]
-    ZeroMintAmount,
-    #[msg("Locked amount does not fit in a u64 token amount")]
-    LockedAmountOverflow,
-    #[msg("Recipient pubkey does not hash to the deposit commitment")]
-    CommitmentMismatch,
-    #[msg("Witness root does not match the committed proof queue batch root")]
-    ProofQueueBatchRootMismatch,
-    #[msg("Witness index is outside the committed proof queue batch")]
-    WitnessIndexOutsideProofQueueBatch,
-    #[msg("Deposit witness is malformed")]
-    InvalidDepositWitness,
-}
 
 #[event]
 pub struct MintApplied {
@@ -99,7 +80,7 @@ pub struct Mint<'info> {
 ///
 /// # Errors
 ///
-/// Returns a [`MintError`] if the deposit witness is malformed (path longer
+/// Returns a [`NoriSolTokenBridgeError`] if the deposit witness is malformed (path longer
 /// than `MAX_TREE_DEPTH`, index beyond `MAX_BATCH`, too many collection
 /// keys), if the witness root does not match the committed
 /// proof queue batch root or its index falls outside the batch, if the
@@ -156,7 +137,7 @@ pub fn handle_mint(ctx: Context<Mint>, deposit_witness: VerifiedRequestWitnessIn
 
     deposit_witness.validate().map_err(|e| {
         msg!("Invalid deposit witness: {}", e);
-        error!(MintError::InvalidDepositWitness)
+        error!(NoriSolTokenBridgeError::InvalidDepositWitness)
     })?;
 
     let root = deposit_witness.root();
@@ -171,7 +152,7 @@ pub fn handle_mint(ctx: Context<Mint>, deposit_witness: VerifiedRequestWitnessIn
                 root,
                 hex::encode(proof_queue_batch.root)
             );
-            error!(MintError::ProofQueueBatchRootMismatch)
+            error!(NoriSolTokenBridgeError::ProofQueueBatchRootMismatch)
         })?;
 
     let proof_queue_batch_size = proof_queue_batch
@@ -185,7 +166,7 @@ pub fn handle_mint(ctx: Context<Mint>, deposit_witness: VerifiedRequestWitnessIn
                 deposit_witness.index,
                 proof_queue_batch_size
             );
-            error!(MintError::WitnessIndexOutsideProofQueueBatch)
+            error!(NoriSolTokenBridgeError::WitnessIndexOutsideProofQueueBatch)
         })?;
 
     let eth_token_bridge_address = {
@@ -193,15 +174,15 @@ pub fn handle_mint(ctx: Context<Mint>, deposit_witness: VerifiedRequestWitnessIn
         state.eth_token_bridge_address
     };
 
-    (request.target == Address::from(eth_token_bridge_address))
+    (Address::from(request.target) == Address::from(eth_token_bridge_address))
         .then_some(())
         .ok_or_else(|| {
             msg!(
                 "Deposit target mismatch, leaf target: {}, expected token bridge address: 0x{}",
-                request.target,
+                Address::from(request.target),
                 hex::encode(eth_token_bridge_address)
             );
-            error!(MintError::NotTokenBridgeRequest)
+            error!(NoriSolTokenBridgeError::NotTokenBridgeRequest)
         })?;
 
     // The deposit committed to sha256(recipient_pubkey). The recipient is a
@@ -215,7 +196,7 @@ pub fn handle_mint(ctx: Context<Mint>, deposit_witness: VerifiedRequestWitnessIn
                 hex::encode(request.collection_keys[0].0),
                 hex::encode(recipient_commitment)
             );
-            error!(MintError::CommitmentMismatch)
+            error!(NoriSolTokenBridgeError::CommitmentMismatch)
         })?;
 
     msg!(
@@ -227,10 +208,10 @@ pub fn handle_mint(ctx: Context<Mint>, deposit_witness: VerifiedRequestWitnessIn
     // Mint amount calculation
     // ================================================================
 
-    let locked_so_far: u64 = request
-        .value
+    let value: U256 = request.value.into();
+    let locked_so_far: u64 = value
         .try_into()
-        .map_err(|_| error!(MintError::LockedAmountOverflow))?;
+        .map_err(|_| error!(NoriSolTokenBridgeError::LockedAmountOverflow))?;
 
     // token_account_storage is an UncheckedAccount (not Account<'info, T>)
     // Anchor never auto-deserializes it for us, so we do it by here.
@@ -245,14 +226,14 @@ pub fn handle_mint(ctx: Context<Mint>, deposit_witness: VerifiedRequestWitnessIn
                 locked_so_far,
                 storage.minted_so_far
             );
-            error!(MintError::MintedExceedsLocked)
+            error!(NoriSolTokenBridgeError::MintedExceedsLocked)
         })?;
 
     let amount_to_mint = locked_so_far - storage.minted_so_far;
 
     (amount_to_mint > 0).then_some(()).ok_or_else(|| {
         msg!("No new amount to mint");
-        error!(MintError::ZeroMintAmount)
+        error!(NoriSolTokenBridgeError::ZeroMintAmount)
     })?;
 
     storage.minted_so_far = locked_so_far;

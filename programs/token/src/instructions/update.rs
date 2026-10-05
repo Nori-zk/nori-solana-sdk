@@ -1,28 +1,8 @@
-use crate::{constants::*, pda::create_program_owned_pda, state::*};
+use crate::{
+    constants::*, error::NoriSolTokenBridgeError, pda::create_program_owned_pda, state::*,
+};
 use alloy_primitives::hex;
 use anchor_lang::prelude::*;
-
-#[error_code]
-pub enum UpdateError {
-    #[msg("SP1 Groth16 proof verification failed")]
-    ProofVerificationFailed,
-    #[msg("Failed to decode proof bytes")]
-    DecodingProofFailed,
-    #[msg("ETH proof queue address mismatch")]
-    ETHProofQueueAddressMismatch,
-    #[msg("Queue cursor mismatch")]
-    QueueCursorMismatch,
-    #[msg("Input slot does not match latest verified head")]
-    InputSlotMismatch,
-    #[msg("Input store hash does not match latest verified store hash")]
-    InputStoreHashMismatch,
-    #[msg("Output slot is not greater than input slot")]
-    InvalidOutputSlot,
-    #[msg("Next sync committee hash is zero")]
-    ZeroSyncCommitteeHash,
-    #[msg("Proof queue batch account is not the PDA for the next proof queue batch index")]
-    ProofQueueBatchAccountMismatch,
-}
 
 #[event]
 pub struct UpdateApplied {
@@ -51,8 +31,9 @@ pub struct Update<'info> {
     pub proof_queue_batch: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
 }
+use crate::idl_types::UpdateProof;
 use nori_sp1_helios_primitives::types::ProofOutputs;
-use sp1_solana::{verify_proof, SP1Groth16Proof};
+use sp1_solana::verify_proof;
 
 /// Advances the bridge's verified Ethereum light-client state by one proof batch.
 ///
@@ -74,11 +55,11 @@ use sp1_solana::{verify_proof, SP1Groth16Proof};
 ///
 /// # Errors
 ///
-/// Returns an [`UpdateError`] if proof verification or decoding fails, if
+/// Returns a [`NoriSolTokenBridgeError`] if proof verification or decoding fails, if
 /// any value the proof commits to breaks continuity with the bridge's current
 /// state, or if a non-empty batch is submitted with an account that is not
 /// the next proof queue batch PDA.
-pub fn handle_update(ctx: Context<Update>, proof: SP1Groth16Proof) -> Result<()> {
+pub fn handle_update(ctx: Context<Update>, proof: UpdateProof) -> Result<()> {
     let mut state = ctx.accounts.state.load_mut()?;
 
     // Hex encode the vkey_hash
@@ -87,13 +68,13 @@ pub fn handle_update(ctx: Context<Update>, proof: SP1Groth16Proof) -> Result<()>
     // Verify the proof
     verify_proof(&proof.proof, proof.sp1_public_inputs.as_slice(), &vkey_hash).map_err(|e| {
         msg!("Proof verification failed: {}", e);
-        error!(UpdateError::ProofVerificationFailed)
+        error!(NoriSolTokenBridgeError::ProofVerificationFailed)
     })?;
 
     // Decode the verified proof
     let proof_outputs = ProofOutputs::from_bytes(&proof.sp1_public_inputs).map_err(|e| {
         msg!("Failed to decode proof: {}", e);
-        error!(UpdateError::DecodingProofFailed)
+        error!(NoriSolTokenBridgeError::DecodingProofFailed)
     })?;
 
     // ================================================================
@@ -109,7 +90,7 @@ pub fn handle_update(ctx: Context<Update>, proof: SP1Groth16Proof) -> Result<()>
                 proof_outputs.proof_request_queue_address,
                 hex::encode(state.eth_proof_queue_address)
             );
-            error!(UpdateError::ETHProofQueueAddressMismatch)
+            error!(NoriSolTokenBridgeError::ETHProofQueueAddressMismatch)
         })?;
 
     // Cursor continuity: the proof must resume exactly where the last one settled
@@ -121,7 +102,7 @@ pub fn handle_update(ctx: Context<Update>, proof: SP1Groth16Proof) -> Result<()>
                 proof_outputs.input_queue_cursor,
                 state.queue_cursor
             );
-            error!(UpdateError::QueueCursorMismatch)
+            error!(NoriSolTokenBridgeError::QueueCursorMismatch)
         })?;
 
     // Input slot must pick up exactly where the last verified head left off
@@ -133,7 +114,7 @@ pub fn handle_update(ctx: Context<Update>, proof: SP1Groth16Proof) -> Result<()>
                 proof_outputs.input_slot,
                 state.latest_head
             );
-            error!(UpdateError::InputSlotMismatch)
+            error!(NoriSolTokenBridgeError::InputSlotMismatch)
         })?;
 
     // Input store hash must chain from the last verified store hash
@@ -145,7 +126,7 @@ pub fn handle_update(ctx: Context<Update>, proof: SP1Groth16Proof) -> Result<()>
                 proof_outputs.input_store_hash,
                 hex::encode(state.latest_helios_store_input_hash)
             );
-            error!(UpdateError::InputStoreHashMismatch)
+            error!(NoriSolTokenBridgeError::InputStoreHashMismatch)
         })?;
 
     // Proof must make forward progress
@@ -157,7 +138,7 @@ pub fn handle_update(ctx: Context<Update>, proof: SP1Groth16Proof) -> Result<()>
                 proof_outputs.input_slot,
                 proof_outputs.output_slot
             );
-            error!(UpdateError::InvalidOutputSlot)
+            error!(NoriSolTokenBridgeError::InvalidOutputSlot)
         })?;
 
     // Next sync committee hash must be populated
@@ -165,7 +146,7 @@ pub fn handle_update(ctx: Context<Update>, proof: SP1Groth16Proof) -> Result<()>
         .then_some(())
         .ok_or_else(|| {
             msg!("Next sync committee hash is zero");
-            error!(UpdateError::ZeroSyncCommitteeHash)
+            error!(NoriSolTokenBridgeError::ZeroSyncCommitteeHash)
         })?;
 
     // ================================================================
@@ -233,7 +214,7 @@ fn create_proof_queue_batch(
                 proof_queue_batch_index,
                 expected_proof_queue_batch
             );
-            error!(UpdateError::ProofQueueBatchAccountMismatch)
+            error!(NoriSolTokenBridgeError::ProofQueueBatchAccountMismatch)
         })?;
 
     let seeds: &[&[u8]] = &[

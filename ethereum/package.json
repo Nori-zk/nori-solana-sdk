@@ -1,8 +1,16 @@
 {
-    "name": "@nori-zk/ethereum-token-bridge-solana-version",
+    "name": "@nori-zk/ethereum-solana-bridge",
     "version": "0.0.16",
     "description": "NoriTokenBridge contract",
     "main": "build/index.js",
+    "exports": {
+        ".": {
+            "import": "./build/index.js"
+        },
+        "./iso-provider": {
+            "import": "./build/isoProvider.js"
+        }
+    },
     "publishConfig": {
         "registry": "https://registry.npmjs.org/",
         "access": "public"
@@ -34,7 +42,8 @@
     "license": "MIT",
     "dependencies": {
         "@openzeppelin/contracts": "5.0.2",
-        "esm-iso-logger": "1.0.2"
+        "esm-iso-logger": "1.0.2",
+        "ethers": "^6.16.0"
     },
     "devDependencies": {
         "@nomicfoundation/hardhat-ethers": "^4.0.1",

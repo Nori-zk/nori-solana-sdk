@@ -149,7 +149,7 @@ impl SolanaProofSubmitter {
         let update = Instruction::new_with_bytes(
             self.program_id,
             &token::instruction::Update {
-                proof: proof.clone(),
+                proof: proof.clone().into(),
             }
             .data(),
             token::accounts::Update {

@@ -125,3 +125,14 @@ The SBF toolchain ships rustc 1.89, so the alloy tree is pinned to 1.6.3
 | `programs/token` | The on-chain program: `initialize`, `update`, `mint` |
 | `proof-submitter` | Client crate: loads SP1 proof JSONs, submits `update` txs over RPC (`SolanaProofSubmitter`), surfpool e2e suite |
 | `test-utils` | Surfpool test harness shared by the suites and downstream crates: validator with kill-on-drop, funded keypairs, CLI deploy, custom error codes |
+| `nori-hash-utils` | Standalone crate compiled to WebAssembly: nori-hash's request leaf and Merkle witness hashing for the TS SDK |
+
+## npm packages
+
+| Package | Folder | Contents |
+|---|---|---|
+| `@nori-zk/ethereum-solana-bridge` | `ethereum/` | Ethereum contracts, generated ethers types, and the `./iso-provider` Ethereum provider |
+| `@nori-zk/nori-hash-utils` | `nori-hash-utils/` | The WebAssembly build of `nori-hash-utils` |
+| `@nori-zk/nori-bridge-solana-sdk` | `sdk/` | The TS SDK: proof request state machines, batch search, witnesses |
+
+Published together with `npm run publish` (`nw-publish`) from the repo root.

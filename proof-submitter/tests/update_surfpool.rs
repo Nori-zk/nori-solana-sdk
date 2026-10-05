@@ -28,7 +28,7 @@ const SLOT_3: u64 = 11_247_424;
 const SLOT_4: u64 = 11_247_456;
 const BLOCK_1: u64 = 11_808_937;
 
-// Anchor custom error codes: 6000 + UpdateError variant index, as they
+// Anchor custom error codes: 6000 + NoriSolTokenBridgeError variant index, as they
 // appear in RPC error text ("custom program error: 0x1774").
 const ERR_QUEUE_ADDRESS_MISMATCH: u32 = 6002;
 const ERR_INPUT_SLOT_MISMATCH: u32 = 6004;
@@ -236,7 +236,8 @@ async fn replaying_a_proof_fails() {
 
 #[tokio::test]
 async fn update_with_wrong_queue_address_fails() {
-    let h = setup_with(|init| init.eth_proof_queue_address = Address::from([0xEEu8; 20])).await;
+    let h =
+        setup_with(|init| init.eth_proof_queue_address = Address::from([0xEEu8; 20]).into()).await;
     let proofs = load_proofs();
     let code = expect_custom_error(h.submitter.submit_update(&proofs[0].wire).await);
     assert_eq!(code, ERR_QUEUE_ADDRESS_MISMATCH);

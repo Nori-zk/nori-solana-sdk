@@ -18,10 +18,10 @@ pub const NORI_SOL_TOKEN_BRIDGE_PROOF_QUEUE_BATCH_SEED: &[u8] = b"PROOF_QUEUE_BA
 #[constant]
 pub const TOKEN_DECIMALS: u8 = 6;
 
-// https://github.com/Nori-zk/nori-bridge-head/blob/SCRAP/request-queue-2-clean-integrated/nori-hash/src/merkle_poseidon_fixed.rs
-#[constant]
+// https://github.com/Nori-zk/nori-bridge-head/blob/FEAT/solana-bridge/nori-hash/src/merkle_sha256_fixed.rs
+// Not #[constant]: usize has no IDL type.
 pub const MAX_TREE_DEPTH: usize = 16;
 
-// https://github.com/Nori-zk/nori-bridge-head/blob/SCRAP/request-queue-2-clean-integrated/nori-hash/src/merkle_poseidon_fixed.rs
-#[constant]
+// https://github.com/Nori-zk/nori-bridge-head/blob/FEAT/solana-bridge/nori-hash/src/merkle_sha256_fixed.rs
+// Not #[constant]: usize has no IDL type.
 pub const MAX_BATCH: usize = 1 << MAX_TREE_DEPTH;
