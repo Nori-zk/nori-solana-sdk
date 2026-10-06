@@ -63,7 +63,7 @@ import {
 } from '../pdas/index.js';
 
 export const TOKEN_PROGRAM_ADDRESS =
-    '5xS32i7XNRk7JCjYR7RgfHVxdLepVSnnJ1gdHkmfD8W1' as Address<'5xS32i7XNRk7JCjYR7RgfHVxdLepVSnnJ1gdHkmfD8W1'>;
+    'EUz5RMQxYkc9zu12wpCDu9syvr4MarghoYb6jHAvdAcg' as Address<'EUz5RMQxYkc9zu12wpCDu9syvr4MarghoYb6jHAvdAcg'>;
 
 export enum TokenAccount {
     NoriSolTokenBridge,
@@ -188,7 +188,7 @@ export function identifyTokenInstruction(
 }
 
 export type ParsedTokenInstruction<
-    TProgram extends string = '5xS32i7XNRk7JCjYR7RgfHVxdLepVSnnJ1gdHkmfD8W1',
+    TProgram extends string = 'EUz5RMQxYkc9zu12wpCDu9syvr4MarghoYb6jHAvdAcg',
 > =
     | ({
           instructionType: TokenInstruction.Initialize;

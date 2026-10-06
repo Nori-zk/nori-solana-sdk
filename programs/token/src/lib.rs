@@ -13,7 +13,7 @@ pub use constants::*;
 pub use instructions::*;
 pub use state::*;
 
-declare_id!("5xS32i7XNRk7JCjYR7RgfHVxdLepVSnnJ1gdHkmfD8W1");
+declare_id!("EUz5RMQxYkc9zu12wpCDu9syvr4MarghoYb6jHAvdAcg");
 
 #[program]
 pub mod token {
