@@ -56,6 +56,8 @@ pub enum SubmitterError {
     TransactionBuild(String),
     #[error("rpc: {0}")]
     Rpc(#[from] solana_rpc_client_api::client_error::Error),
+    #[error("bridge state account data is {len} bytes, expected at least {expected}")]
+    StateAccountData { len: usize, expected: usize },
 }
 
 pub struct SolanaProofSubmitter {
@@ -96,26 +98,44 @@ impl SolanaProofSubmitter {
         self.payer.pubkey()
     }
 
+    pub fn program_id(&self) -> Pubkey {
+        self.program_id
+    }
+
+    pub fn rpc_url(&self) -> &str {
+        &self.rpc_url
+    }
+
+    /// Bridge state PDA (`[b"STATE"]`), created by `initialize`.
+    pub fn state_address(&self) -> Pubkey {
+        Pubkey::find_program_address(
+            &[token::constants::NORI_SOL_TOKEN_BRIDGE_STATE_SEED],
+            &self.program_id,
+        )
+        .0
+    }
+
+    /// Bridged token mint PDA (`[b"NETH"]`), created by `initialize`.
+    pub fn mint_address(&self) -> Pubkey {
+        Pubkey::find_program_address(
+            &[token::constants::NORI_SOL_TOKEN_BRIDGE_SEED],
+            &self.program_id,
+        )
+        .0
+    }
+
     /// The `initialize` instruction (one-off bridge setup; see DEPLOYMENT.md).
     pub fn build_initialize_instruction(
         &self,
         init_values: token::state::NoriSolTokenBridgeInit,
     ) -> Instruction {
-        let (state, _bump) = Pubkey::find_program_address(
-            &[token::constants::NORI_SOL_TOKEN_BRIDGE_STATE_SEED],
-            &self.program_id,
-        );
-        let (token_mint, _bump) = Pubkey::find_program_address(
-            &[token::constants::NORI_SOL_TOKEN_BRIDGE_SEED],
-            &self.program_id,
-        );
         Instruction::new_with_bytes(
             self.program_id,
             &token::instruction::Initialize { init_values }.data(),
             token::accounts::Initialize {
                 payer: self.payer.pubkey(),
-                token: token_mint,
-                state,
+                token: self.mint_address(),
+                state: self.state_address(),
                 system_program: system_program::ID,
                 token_program: anchor_spl::token::ID,
             }
@@ -123,21 +143,33 @@ impl SolanaProofSubmitter {
         )
     }
 
-    /// The `update` instruction: state PDA + system program, plus a compute
-    /// budget raise, as a two-instruction message payload.
-    pub fn build_update_instructions(&self, proof: &SP1Groth16Proof) -> Vec<Instruction> {
-        let (state, _bump) = Pubkey::find_program_address(
-            &[token::constants::NORI_SOL_TOKEN_BRIDGE_STATE_SEED],
+    /// The `update` instruction: payer, state PDA, the proof queue batch PDA
+    /// for `proof_queue_batch_count` (the next index; the program only
+    /// creates it when the proof's batch drained at least one request) and
+    /// the system program, plus a compute budget raise, as a two-instruction
+    /// message payload.
+    pub fn build_update_instructions(
+        &self,
+        proof: &SP1Groth16Proof,
+        proof_queue_batch_count: u64,
+    ) -> Vec<Instruction> {
+        let (proof_queue_batch, _bump) = Pubkey::find_program_address(
+            &[
+                token::constants::NORI_SOL_TOKEN_BRIDGE_PROOF_QUEUE_BATCH_SEED,
+                &proof_queue_batch_count.to_le_bytes(),
+            ],
             &self.program_id,
         );
         let update = Instruction::new_with_bytes(
             self.program_id,
             &token::instruction::Update {
-                proof: proof.clone(),
+                proof: proof.clone().into(),
             }
             .data(),
             token::accounts::Update {
-                state,
+                payer: self.payer.pubkey(),
+                state: self.state_address(),
+                proof_queue_batch,
                 system_program: system_program::ID,
             }
             .to_account_metas(None),
@@ -161,14 +193,34 @@ impl SolanaProofSubmitter {
             .await
     }
 
-    /// Submit one proof batch as an `update` transaction.
+    /// Submit one proof batch as an `update` transaction. Reads the bridge
+    /// state first for the next proof queue batch index; if another update
+    /// lands in between, the program's continuity checks reject this one.
     pub async fn submit_update(
         &self,
         proof: &SP1Groth16Proof,
     ) -> Result<SolanaTransactionResult, SubmitterError> {
-        let instructions = self.build_update_instructions(proof);
+        let proof_queue_batch_count = self.fetch_proof_queue_batch_count().await?;
+        let instructions = self.build_update_instructions(proof, proof_queue_batch_count);
         self.send_instructions_with_signers(instructions, &[], "update")
             .await
+    }
+
+    /// Read `proof_queue_batch_count` from the bridge state account.
+    async fn fetch_proof_queue_batch_count(&self) -> Result<u64, SubmitterError> {
+        let client = RpcClient::new(self.rpc_url.clone());
+        let account = client.get_account(&self.state_address()).await?;
+        // 8-byte Anchor discriminator, then the zero-copy state struct.
+        let expected = 8 + std::mem::size_of::<token::state::NoriSolTokenBridge>();
+        let data = account
+            .data
+            .get(8..expected)
+            .ok_or(SubmitterError::StateAccountData {
+                len: account.data.len(),
+                expected,
+            })?;
+        let state: token::state::NoriSolTokenBridge = bytemuck::pod_read_unaligned(data);
+        Ok(state.proof_queue_batch_count)
     }
 
     /// Deploy a compiled program (raw `.so` bytes) to the configured RPC via
@@ -290,7 +342,7 @@ async fn fetch_cu_consumed(client: &RpcClient, signature: &Signature) -> Option<
 }
 
 /// Solana CLI keypair file: a JSON array of 64 bytes.
-fn read_keypair_file(path: &str) -> Result<Keypair, SubmitterError> {
+pub fn read_keypair_file(path: &str) -> Result<Keypair, SubmitterError> {
     let text = std::fs::read_to_string(path).map_err(|e| SubmitterError::KeypairRead {
         path: path.to_string(),
         reason: e.to_string(),

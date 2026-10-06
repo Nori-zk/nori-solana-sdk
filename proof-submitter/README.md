@@ -6,8 +6,9 @@ proof JSONs — as produced by
 on-chain wire format and submits `update` transactions to the deployed
 token program over JSON-RPC.
 
-Library only: there is no CLI/binary yet; submission is driven from
-nori-bridge-head's submitter side.
+Library only: `update` submission is driven from nori-bridge-head's
+submitter side. The one-off `initialize` of a deployed program is sent
+with `nori-cli` (`cli/`, DEPLOYMENT.md §6), built on this crate.
 
 ## Loading proofs
 
@@ -34,22 +35,29 @@ Wire format, from the proof JSON fields:
 - `from_env()` — config from environment (see below); `.env` files are
   picked up via dotenvy.
 - `new(rpc_url, payer, program_id)` — explicit construction.
-- `build_update_instructions(&proof.wire)` — the `update` instruction
-  plus a 200k compute-unit-limit instruction (measured ~103.4k CU per
-  update; unused units are not charged).
+- `build_update_instructions(&proof.wire, proof_queue_batch_count)` — the
+  `update` instruction (payer, state, the proof queue batch PDA for
+  `proof_queue_batch_count`, system program) plus a 200k
+  compute-unit-limit instruction (measured ~103.4k CU per update with an
+  empty batch; unused units are not charged).
 - `deploy_program(&program_keypair, &so_bytes).await` — deploys a compiled
   program via the upgradeable loader (create buffer → chunked writes →
   deploy). Dev/test convenience: sequential, no resume. Production deploys
   should use the CLI below, which batches in parallel and resumes.
 - `build_initialize_instruction(init_values)` — one-off bridge setup.
+- `state_address()` / `mint_address()` — the state (`[b"STATE"]`) and
+  mint (`[b"NETH"]`) PDAs for the configured program id.
 - `submit_initialize(init_values).await` — sends and confirms the one-off
   `initialize` transaction (creates the state PDA and the token mint). The
   init values come from the first proof:
   `proofs[0].bridge_init(verified_state_root, eth_token_bridge_address)`,
   which resumes the bridge from the proof's input side (slot, store hash,
   queue cursor) and pins its queue address.
-- `submit_update(&proof.wire).await` — sends and confirms the
-  transaction, returns `SolanaTransactionResult { tx_hash }`.
+- `submit_update(&proof.wire).await` — reads `proof_queue_batch_count`
+  from the bridge state, then sends and confirms the transaction; returns
+  `SolanaTransactionResult { tx_hash, cu_consumed }`. If another update
+  lands between the read and the send, the program's continuity checks
+  reject this one.
 
 ### Environment variables
 
@@ -92,16 +100,19 @@ Two suites:
 - `tests/update_surfpool.rs` — end-to-end against a local Surfnet
   validator. Requires `surfpool` and the `solana` CLI on PATH and
   `target/deploy/token.so` built (above). Each test boots its own
-  `surfpool start --offline --no-deploy --ci` on free ports, deploys the
-  program, initializes the bridge from the first example proof, and
-  submits updates through `SolanaProofSubmitter` over RPC.
+  validator through `test-utils` (`surfpool start --offline --no-deploy
+  --ci` on free ports, killed on drop), deploys the program, initializes
+  the bridge from the first example proof, and submits updates through
+  `SolanaProofSubmitter` over RPC.
 
 Run the host tests only with
 `cargo test -p proof-submitter --test proof_file`.
 
 The example proofs live in `proof-submitter/example-proofs/`: four
-chained `update` proofs with no deposits, so `mint` is not exercised by
-them.
+chained `update` proofs with empty batches (no deposits), so they create
+no proof queue batch accounts and do not exercise `mint`. `mint` is
+covered by `programs/token/tests/test_mint.rs`, which writes the batch
+account directly with surfpool's `surfnet_setAccount` cheatcode.
 
 ## Manual smoke test on a local surfpool
 
@@ -119,7 +130,10 @@ export SOLANA_RPC_NETWORK_URL=http://127.0.0.1:8899
 export SOLANA_PAYER_KEYPAIR_PATH=$HOME/.config/solana/id.json
 ```
 
-Then initialize the bridge with the first proof's init values
-(`proofs[0].bridge_init(verified_state_root, eth_token_bridge_address)` via
-`submit_initialize`) and call `submit_update` per proof — see
+Then initialize the bridge with the first proof's init values — from the
+repo root, `cargo run -p nori-cli -- initialize --proof <first proof>
+--verified-state-root <root> --eth-token-bridge-address <addr>` (it reads
+the two variables above), or in Rust
+`proofs[0].bridge_init(verified_state_root, eth_token_bridge_address)` via
+`submit_initialize` — and call `submit_update` per proof; see
 `tests/update_surfpool.rs` for the full sequence.

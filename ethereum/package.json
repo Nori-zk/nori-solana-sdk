@@ -1,8 +1,16 @@
 {
-    "name": "@nori-zk/ethereum-token-bridge-solana-version",
+    "name": "@nori-zk/ethereum-solana-bridge",
     "version": "0.0.16",
     "description": "NoriTokenBridge contract",
     "main": "build/index.js",
+    "exports": {
+        ".": {
+            "import": "./build/index.js"
+        },
+        "./iso-provider": {
+            "import": "./build/isoProvider.js"
+        }
+    },
     "publishConfig": {
         "registry": "https://registry.npmjs.org/",
         "access": "public"
@@ -10,8 +18,8 @@
     "type": "module",
     "scripts": {
         "build": "ETH_NETWORK=hardhat npm run clean && ETH_NETWORK=hardhat hardhat compile && node stabilize-types.mjs . && tsc -p tsconfig.package.json",
-        "test": "ETH_NETWORK=hardhat hardhat test",
-        "test-ci": "ETH_NETWORK=hardhat hardhat test",
+        "test": "ETH_NETWORK=hardhat hardhat test; code=$?; node stabilize-types.mjs . && exit $code",
+        "test-ci": "ETH_NETWORK=hardhat hardhat test; code=$?; node stabilize-types.mjs . && exit $code",
         "typecheck": "tsc --noEmit",
         "clean": "hardhat clean",
         "format": "prettier --check --ignore-unknown **/*",
@@ -34,7 +42,8 @@
     "license": "MIT",
     "dependencies": {
         "@openzeppelin/contracts": "5.0.2",
-        "esm-iso-logger": "1.0.2"
+        "esm-iso-logger": "1.0.2",
+        "ethers": "^6.16.0"
     },
     "devDependencies": {
         "@nomicfoundation/hardhat-ethers": "^4.0.1",

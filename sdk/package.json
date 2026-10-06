@@ -1,0 +1,93 @@
+{
+    "name": "@nori-zk/nori-bridge-solana-sdk",
+    "version": "0.0.1",
+    "description": "Nori bridge Solana SDK: track Ethereum proof requests through the bridge to Solana and build their witnesses",
+    "author": "",
+    "license": "Apache-2.0",
+    "keywords": [
+        "nori",
+        "bridge",
+        "solana",
+        "proof-queue"
+    ],
+    "publishConfig": {
+        "registry": "https://registry.npmjs.org/",
+        "access": "public"
+    },
+    "type": "module",
+    "main": "build/index.js",
+    "types": "build/index.d.ts",
+    "exports": {
+        ".": {
+            "import": "./build/index.js"
+        },
+        "./program": {
+            "import": "./build/program/index.js"
+        },
+        "./rx/connectivity": {
+            "import": "./build/rx/connectivity.js"
+        },
+        "./rx/proofRequest": {
+            "import": "./build/rx/proofRequest.js"
+        },
+        "./rx/socket": {
+            "import": "./build/rx/socket.js"
+        },
+        "./rx/topics": {
+            "import": "./build/rx/topics.js"
+        }
+    },
+    "scripts": {
+        "clean": "rimraf build",
+        "build": "npm run clean && tsc",
+        "build:cache-layouts": "node --experimental-vm-modules build/bin/buildCacheServerLayouts.js",
+        "buildw": "tsc --watch",
+        "coverage": "node --experimental-vm-modules ../node_modules/jest/bin/jest.js --coverage --runInBand",
+        "format": "prettier --check --ignore-unknown **/*",
+        "format:fix": "prettier --write --ignore-unknown **/*",
+        "test": "node --experimental-vm-modules ../node_modules/jest/bin/jest.js --runInBand --forceExit",
+        "test:unit": "for f in $(find src -name '*.unit.spec.ts'); do node --experimental-vm-modules ../node_modules/jest/bin/jest.js --runInBand --forceExit \"$f\" || exit 1; done",
+        "test:integration": "for f in $(find src -name '*.integration.spec.ts'); do node --experimental-vm-modules ../node_modules/jest/bin/jest.js --runInBand --forceExit \"$f\" || exit 1; done",
+        "test:e2e": "for f in $(find src -name '*.e2e.spec.ts'); do node --experimental-vm-modules ../node_modules/jest/bin/jest.js --runInBand --forceExit \"$f\" || exit 1; done",
+        "test-ci": "npm run test:unit",
+        "testw": "node --experimental-vm-modules ../node_modules/jest/bin/jest.js --watch --runInBand",
+        "lint": "npx eslint src/*",
+        "lint:fix": "npx eslint src/* --fix",
+        "generate:client": "node scripts/generate-client.mjs"
+    },
+    "devDependencies": {
+        "@babel/preset-env": "^7.29.0",
+        "@babel/preset-typescript": "^7.28.5",
+        "@codama/nodes-from-anchor": "^1.5.6",
+        "@codama/renderers-js": "^2.5.0",
+        "@types/jest": "^30.0.0",
+        "@typescript-eslint/eslint-plugin": "^8.55.0",
+        "@typescript-eslint/parser": "^8.55.0",
+        "codama": "^1.11.0",
+        "eslint": "^9.39.2",
+        "jest": "^30.2.0",
+        "npm-workspaces-publish-tool": "0.0.18",
+        "prettier": "^3.8.1",
+        "rimraf": "^6.1.2",
+        "ts-jest": "^29.4.6",
+        "ts-node": "^10.9.2",
+        "typescript": "^5.9.3",
+        "typescript-eslint": "^8.55.0"
+    },
+    "engines": {
+        "node": ">=20.0.0"
+    },
+    "dependencies": {
+        "@nori-zk/ethereum-solana-bridge": "*",
+        "@nori-zk/nori-hash-utils": "*",
+        "@nori-zk/pts-types": "7.0.2",
+        "@yaw-rx/ystate": "^0.0.2",
+        "esm-iso-logger": "1.0.2",
+        "ethers": "^6.16.0",
+        "rxjs": "^7.8.2",
+        "@solana/program-client-core": "^8.3.0"
+    },
+    "peerDependencies": {
+        "@solana/kit": "^8.3.0"
+    }
+}

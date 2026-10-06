@@ -24,8 +24,12 @@ baseline, scoped down for this route: one-way, lock only, no unlock path.
 | `ethereum/tasks/` | Hardhat tasks: deploy, deployTimelock, lockTokens, fee admin, previews |
 | `ethereum/test/` | Mocha tests (run via Hardhat); `test-vectors/` holds storage-layout vectors shared with the SP1 guest |
 | `ethereum/types/ethers-contracts/` | **Generated** by `hardhat compile`; committed after `stabilize-types.mjs` sorts unstable lines. Never hand-edit |
-| `programs/token/` | Anchor program: `initialize`, `update`, `mint` + zero-copy state |
+| `programs/token/` | Anchor program: `initialize`, `update`, `mint` + zero-copy state and append-only proof queue batch PDAs |
 | `proof-submitter/` | Client crate: proof-JSON loader + `SolanaProofSubmitter` (RPC `update` sender) |
+| `cli/` | `nori-cli` operator binary on top of `proof-submitter`: `initialize` for an already deployed program (DEPLOYMENT.md §6) |
+| `idl/`, `sdk/src/program/` | **Generated** from `programs/token` by `anchor idl build` and Codama (sdk/README.md "How to regenerate the Solana client"). Never hand-edit; regenerate with the program change |
+| `nori-hash-utils/` | Standalone crate (own Cargo workspace and lock) compiling nori-bridge-head's `nori-hash` to WebAssembly with `wasm-bindgen` + `tsify`; `pkg/` is build output |
+| `test-utils/` | Surfpool test harness (validator kill-on-drop, funded keypairs, CLI deploy, custom error codes); no dependency on `token`, so the program's own tests can use it |
 | `proof-submitter/example-proofs/` | Four chained SP1 Groth16 proofs (no deposits) used by the test suites |
 | `DEPLOYMENT.md` | Production runbook (Safe → Timelock → ETH contracts → Solana program) |
 | `DEVELOPMENT_GUIDE.md` | Toolchain setup (Solana CLI, Anchor, Surfpool) |
@@ -43,6 +47,7 @@ cd ..   # repo root
 CFLAGS="-isystem $HOME/.cache/solana/v1.54/platform-tools/llvm/sbpf/include" \
     cargo build-sbf --manifest-path programs/token/Cargo.toml   # → target/deploy/token.so
 cargo test                # surfpool suites (needs surfpool + solana CLI on PATH)
+cargo run -p nori-cli -- initialize --help   # one-off initialize of a deployed program
 cargo clippy --workspace --all-targets   # clean
 cargo fmt --all --check                  # clean
 ```
@@ -76,17 +81,23 @@ cargo fmt --all --check                  # clean
 - The bridge pins `proofQueue` as an immutable with no setter; the Solana
   side pins the same two addresses at `initialize`. Both sides move together
   or not at all.
-- `NoriSolTokenBridge` is a **zero-copy** account (`AccountLoader`, 5 576
-  bytes with explicit `_padding`): the struct must stay `Pod` — fixed-size
-  fields only, no Borsh/Vec. Instantiating it on stack blows the 4 KB SBF
-  frame; `initialize` writes fields into the zeroed account one by one.
+- `NoriSolTokenBridge` is a **zero-copy** account (`AccountLoader`, 192
+  bytes + 8-byte discriminator): the struct must stay `Pod` — fixed-size
+  fields only, ordered so there is no padding, no Borsh/Vec.
 - `update`'s state account must stay `mut` — `load_mut()` rejects read-only
-  accounts with `AccountNotMutable`.
-
-## Known open items (also in README.md)
-
-- `mint` computes the witness root but does not check it against the ring
-  buffer yet (deposit membership unverified).
+  accounts with `AccountNotMutable`. `mint`'s stays read-only so mints do
+  not write-lock state against `update`.
+- Proof queue batches are append-only PDAs at
+  `[b"PROOF_QUEUE_BATCH", index.to_le_bytes()]`, created only by `update`
+  and only for non-empty batches, with contiguous indices from 0
+  (`proof_queue_batch_count`). Never overwrite or close them: `mint` trusts
+  any program-owned `ProofRequestRootEntry` as a committed batch.
+- Create program-owned PDAs only through `pda::create_program_owned_pda`:
+  their addresses are predictable, and a bare `create_account` fails
+  forever once someone pre-funds the address.
+- Serialize into account data with `try_serialize(&mut &mut data[..])`,
+  never `&mut *data` — the latter advances the account's stored slice, so
+  later reads in the same instruction see empty data.
 
 ## Conventions
 

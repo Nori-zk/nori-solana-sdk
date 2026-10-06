@@ -1,54 +1,46 @@
-use crate::{constants::*, state::*};
+use crate::{
+    constants::*, error::NoriSolTokenBridgeError, pda::create_program_owned_pda, state::*,
+};
 use alloy_primitives::hex;
 use anchor_lang::prelude::*;
-
-#[error_code]
-pub enum UpdateError {
-    #[msg("SP1 Groth16 proof verification failed")]
-    ProofVerificationFailed,
-    #[msg("Failed to decode proof bytes")]
-    DecodingProofFailed,
-    #[msg("ETH proof queue address mismatch")]
-    ETHProofQueueAddressMismatch,
-    #[msg("Queue cursor mismatch")]
-    QueueCursorMismatch,
-    #[msg("Input slot does not match latest verified head")]
-    InputSlotMismatch,
-    #[msg("Input store hash does not match latest verified store hash")]
-    InputStoreHashMismatch,
-    #[msg("Output slot is not greater than input slot")]
-    InvalidOutputSlot,
-    #[msg("Next sync committee hash is zero")]
-    ZeroSyncCommitteeHash,
-}
 
 #[event]
 pub struct UpdateApplied {
     pub output_slot: u64,
     pub queue_cursor: u64,
     pub verified_state_root: [u8; 32],
-    pub window_index: u8,
+    pub proof_queue_batch_count: u64,
 }
 
 #[derive(Accounts)]
 pub struct Update<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
     #[account(
         mut,
         seeds = [NORI_SOL_TOKEN_BRIDGE_STATE_SEED],
         bump
     )]
     pub state: AccountLoader<'info, NoriSolTokenBridge>,
+    /// CHECK: the PDA for the next proof queue batch index
+    /// (`state.proof_queue_batch_count`). Its address can only be checked
+    /// against state inside the handler, so seeds are derived and compared
+    /// there; it is created and written in handle_update only when the
+    /// update's batch drained at least one request, and ignored otherwise.
+    #[account(mut)]
+    pub proof_queue_batch: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
 }
+use crate::idl_types::UpdateProof;
 use nori_sp1_helios_primitives::types::ProofOutputs;
-use sp1_solana::{verify_proof, SP1Groth16Proof};
+use sp1_solana::verify_proof;
 
 /// Advances the bridge's verified Ethereum light-client state by one proof batch.
 ///
 /// This is the bridge's permissionless state-transition entrypoint: anyone may
 /// call it, and the only credential that matters is a valid SP1 Groth16 proof
 /// for the batch. The stored vkey anchors which proving program is trusted;
-/// the signer is irrelevant.
+/// the signer only pays rent for the proof queue batch account.
 ///
 /// Each accepted call moves `latest_head`, the execution state root, the
 /// store-hash chain, and the proof-request queue cursor forward together,
@@ -57,15 +49,17 @@ use sp1_solana::{verify_proof, SP1Groth16Proof};
 /// settled queue cursor, chain from the latest verified head and store hash,
 /// and make forward progress — so no caller can skip, replay, or fork history.
 ///
-/// On success, the batch's deposit root is recorded in the rolling window that
-/// minting later reads from, and an [`UpdateApplied`] event is emitted.
+/// On success, when the batch drained at least one request, its root and
+/// cursor range are recorded append-only in a new proof queue batch account
+/// at the next index; an [`UpdateApplied`] event is emitted either way.
 ///
 /// # Errors
 ///
-/// Returns an [`UpdateError`] if proof verification or decoding fails, or if
+/// Returns a [`NoriSolTokenBridgeError`] if proof verification or decoding fails, if
 /// any value the proof commits to breaks continuity with the bridge's current
-/// state.
-pub fn handle_update(ctx: Context<Update>, proof: SP1Groth16Proof) -> Result<()> {
+/// state, or if a non-empty batch is submitted with an account that is not
+/// the next proof queue batch PDA.
+pub fn handle_update(ctx: Context<Update>, proof: UpdateProof) -> Result<()> {
     let mut state = ctx.accounts.state.load_mut()?;
 
     // Hex encode the vkey_hash
@@ -74,13 +68,13 @@ pub fn handle_update(ctx: Context<Update>, proof: SP1Groth16Proof) -> Result<()>
     // Verify the proof
     verify_proof(&proof.proof, proof.sp1_public_inputs.as_slice(), &vkey_hash).map_err(|e| {
         msg!("Proof verification failed: {}", e);
-        error!(UpdateError::ProofVerificationFailed)
+        error!(NoriSolTokenBridgeError::ProofVerificationFailed)
     })?;
 
     // Decode the verified proof
     let proof_outputs = ProofOutputs::from_bytes(&proof.sp1_public_inputs).map_err(|e| {
         msg!("Failed to decode proof: {}", e);
-        error!(UpdateError::DecodingProofFailed)
+        error!(NoriSolTokenBridgeError::DecodingProofFailed)
     })?;
 
     // ================================================================
@@ -96,7 +90,7 @@ pub fn handle_update(ctx: Context<Update>, proof: SP1Groth16Proof) -> Result<()>
                 proof_outputs.proof_request_queue_address,
                 hex::encode(state.eth_proof_queue_address)
             );
-            error!(UpdateError::ETHProofQueueAddressMismatch)
+            error!(NoriSolTokenBridgeError::ETHProofQueueAddressMismatch)
         })?;
 
     // Cursor continuity: the proof must resume exactly where the last one settled
@@ -108,7 +102,7 @@ pub fn handle_update(ctx: Context<Update>, proof: SP1Groth16Proof) -> Result<()>
                 proof_outputs.input_queue_cursor,
                 state.queue_cursor
             );
-            error!(UpdateError::QueueCursorMismatch)
+            error!(NoriSolTokenBridgeError::QueueCursorMismatch)
         })?;
 
     // Input slot must pick up exactly where the last verified head left off
@@ -120,7 +114,7 @@ pub fn handle_update(ctx: Context<Update>, proof: SP1Groth16Proof) -> Result<()>
                 proof_outputs.input_slot,
                 state.latest_head
             );
-            error!(UpdateError::InputSlotMismatch)
+            error!(NoriSolTokenBridgeError::InputSlotMismatch)
         })?;
 
     // Input store hash must chain from the last verified store hash
@@ -132,7 +126,7 @@ pub fn handle_update(ctx: Context<Update>, proof: SP1Groth16Proof) -> Result<()>
                 proof_outputs.input_store_hash,
                 hex::encode(state.latest_helios_store_input_hash)
             );
-            error!(UpdateError::InputStoreHashMismatch)
+            error!(NoriSolTokenBridgeError::InputStoreHashMismatch)
         })?;
 
     // Proof must make forward progress
@@ -144,7 +138,7 @@ pub fn handle_update(ctx: Context<Update>, proof: SP1Groth16Proof) -> Result<()>
                 proof_outputs.input_slot,
                 proof_outputs.output_slot
             );
-            error!(UpdateError::InvalidOutputSlot)
+            error!(NoriSolTokenBridgeError::InvalidOutputSlot)
         })?;
 
     // Next sync committee hash must be populated
@@ -152,14 +146,26 @@ pub fn handle_update(ctx: Context<Update>, proof: SP1Groth16Proof) -> Result<()>
         .then_some(())
         .ok_or_else(|| {
             msg!("Next sync committee hash is zero");
-            error!(UpdateError::ZeroSyncCommitteeHash)
+            error!(NoriSolTokenBridgeError::ZeroSyncCommitteeHash)
         })?;
 
     // ================================================================
     // Commit the update to bridge state
     // ================================================================
 
-    state.apply_update(&proof_outputs);
+    let proof_queue_batch = state.apply_update(&proof_outputs);
+    let verified_state_root = state.verified_state_root;
+    let queue_cursor = state.queue_cursor;
+    let proof_queue_batch_count = state.proof_queue_batch_count;
+    drop(state);
+
+    // ================================================================
+    // Record the proof queue batch
+    // ================================================================
+
+    if let Some((proof_queue_batch_index, proof_request_root_entry)) = proof_queue_batch {
+        create_proof_queue_batch(&ctx, proof_queue_batch_index, &proof_request_root_entry)?;
+    }
 
     // ================================================================
     // Emit success event / message
@@ -168,15 +174,64 @@ pub fn handle_update(ctx: Context<Update>, proof: SP1Groth16Proof) -> Result<()>
     emit!(UpdateApplied {
         output_slot: proof_outputs.output_slot,
         queue_cursor: proof_outputs.output_queue_cursor,
-        verified_state_root: state.verified_state_root,
-        window_index: state.window_index,
+        verified_state_root,
+        proof_queue_batch_count,
     });
 
     msg!(
-        "Update applied: slot {}, cursor {}, window {}",
+        "Update applied: slot {}, cursor {}, proof queue batches {}",
         proof_outputs.output_slot,
-        state.queue_cursor,
-        state.window_index
+        queue_cursor,
+        proof_queue_batch_count
     );
+    Ok(())
+}
+
+/// Creates the proof queue batch PDA for `proof_queue_batch_index` and writes
+/// `proof_request_root_entry` into it. The next PDA address is predictable
+/// from state, so creation goes through [`create_program_owned_pda`], which
+/// tolerates the address having been pre-funded.
+fn create_proof_queue_batch(
+    ctx: &Context<Update>,
+    proof_queue_batch_index: u64,
+    proof_request_root_entry: &ProofRequestRootEntry,
+) -> Result<()> {
+    let proof_queue_batch_index_bytes = proof_queue_batch_index.to_le_bytes();
+    let (expected_proof_queue_batch, bump) = Pubkey::find_program_address(
+        &[
+            NORI_SOL_TOKEN_BRIDGE_PROOF_QUEUE_BATCH_SEED,
+            &proof_queue_batch_index_bytes,
+        ],
+        &crate::ID,
+    );
+
+    (ctx.accounts.proof_queue_batch.key() == expected_proof_queue_batch)
+        .then_some(())
+        .ok_or_else(|| {
+            msg!(
+                "Proof queue batch account mismatch, passed: {}, expected PDA for index {}: {}",
+                ctx.accounts.proof_queue_batch.key(),
+                proof_queue_batch_index,
+                expected_proof_queue_batch
+            );
+            error!(NoriSolTokenBridgeError::ProofQueueBatchAccountMismatch)
+        })?;
+
+    let seeds: &[&[u8]] = &[
+        NORI_SOL_TOKEN_BRIDGE_PROOF_QUEUE_BATCH_SEED,
+        &proof_queue_batch_index_bytes,
+        &[bump],
+    ];
+    let proof_queue_batch = ctx.accounts.proof_queue_batch.to_account_info();
+    create_program_owned_pda(
+        ctx.accounts.payer.to_account_info(),
+        proof_queue_batch.clone(),
+        ctx.accounts.system_program.key(),
+        seeds,
+        8 + ProofRequestRootEntry::INIT_SPACE,
+    )?;
+
+    let mut data = proof_queue_batch.try_borrow_mut_data()?;
+    proof_request_root_entry.try_serialize(&mut &mut data[..])?;
     Ok(())
 }

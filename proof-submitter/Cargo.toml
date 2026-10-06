@@ -11,6 +11,7 @@ nori-sp1-helios-primitives = { git = "https://github.com/Nori-zk/nori-bridge-hea
 alloy-primitives = { version = "1.7.1", features = ["borsh"] }
 anchor-lang = "1.1.2"
 anchor-spl = "1.1.2"
+bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -29,5 +30,5 @@ solana-signature = "3"
 solana-transaction-status-client-types = "3"
 
 [dev-dependencies]
-bytemuck = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+test-utils = { path = "../test-utils" }
+tokio ={ version = "1", features = ["macros", "rt-multi-thread"] }

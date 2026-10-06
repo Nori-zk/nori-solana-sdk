@@ -1,7 +1,9 @@
 pub mod constants;
 pub mod deposit_witness;
 pub mod error;
+pub mod idl_types;
 pub mod instructions;
+mod pda;
 pub mod request_leaf_hash;
 pub mod state;
 
@@ -23,7 +25,7 @@ pub mod token {
 
     /// Permissionless state transition: advance the verified Ethereum
     /// light-client state by one SP1 Groth16 proof batch.
-    pub fn update(ctx: Context<Update>, proof: sp1_solana::SP1Groth16Proof) -> Result<()> {
+    pub fn update(ctx: Context<Update>, proof: idl_types::UpdateProof) -> Result<()> {
         crate::instructions::update::handle_update(ctx, proof)
     }
 

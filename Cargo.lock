@@ -3677,6 +3677,7 @@ dependencies = [
  "solana-transaction",
  "solana-transaction-status-client-types",
  "sp1-solana",
+ "test-utils",
  "thiserror 2.0.20",
  "token",
  "tokio",
@@ -6142,6 +6143,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
+name = "test-utils"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "solana-keypair",
+ "solana-rpc-client",
+ "solana-signer",
+ "tokio",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6255,6 +6267,7 @@ dependencies = [
  "solana-signer",
  "solana-transaction",
  "sp1-solana",
+ "test-utils",
  "tokio",
 ]
 

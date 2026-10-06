@@ -15,7 +15,7 @@ export interface NoriProofRequestQueue$Type {
   readonly deployedLinkReferences: {};
   readonly immutableReferences: {};
   readonly inputSourceName: "project/contracts/NoriProofRequestQueue.sol";
-  readonly buildInfoId: "solc-0_8_28-1d1b9ca6cad68fbcadf46bb48a2fbd6fb03da482";
+  readonly buildInfoId: "solc-0_8_28-38183cb039eb1976f2358465b65030dd9a418317";
 };
 
 import "hardhat/types/artifacts";

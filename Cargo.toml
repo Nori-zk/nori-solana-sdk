@@ -1,7 +1,9 @@
 [workspace]
 members = [
+    "cli",
     "programs/*",
     "proof-submitter",
+    "test-utils",
 ]
 resolver = "2"
 

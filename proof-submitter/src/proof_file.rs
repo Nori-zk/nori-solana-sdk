@@ -102,10 +102,10 @@ impl LoadedProof {
     ) -> Result<token::state::NoriSolTokenBridgeInit, ProofFileError> {
         let outputs = self.outputs()?;
         Ok(token::state::NoriSolTokenBridgeInit {
-            verified_state_root,
-            latest_helios_store_input_hash: outputs.input_store_hash,
-            eth_proof_queue_address: outputs.proof_request_queue_address,
-            eth_token_bridge_address,
+            verified_state_root: verified_state_root.into(),
+            latest_helios_store_input_hash: outputs.input_store_hash.into(),
+            eth_proof_queue_address: outputs.proof_request_queue_address.into(),
+            eth_token_bridge_address: eth_token_bridge_address.into(),
             latest_head: outputs.input_slot,
             queue_cursor: outputs.input_queue_cursor,
         })

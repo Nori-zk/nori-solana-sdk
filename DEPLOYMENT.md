@@ -154,7 +154,7 @@ mint PDA (`[b"NETH"]`) — record the derived addresses after §6.
 
 ## 6. Initialize the Solana bridge state
 
-One `initialize` call creates the state PDA and the SPL mint (12 decimals,
+One `initialize` call creates the state PDA and the SPL mint (6 decimals,
 mint & freeze authority = state PDA) and pins the integrity constants.
 
 Init values (`NoriSolTokenBridgeInit`):
@@ -172,13 +172,42 @@ The transaction payer becomes `authority` in the stored state. `update` is
 permissionless (only a valid proof matters), so `authority` currently has no
 privileged instruction — keep it a controlled key regardless.
 
-> Tooling gap: no initialize CLI ships in this repo yet — invoke through a
-> script built on the generated IDL/client. Track in Appendix B.
+Every `update` whose batch drains at least one proof request creates a
+proof queue batch account (`[b"PROOF_QUEUE_BATCH", index]`, 64 bytes), and
+the `update` payer funds its rent exemption (~0.0013 SOL) on top of the
+transaction fee. Updates with empty batches pay only the fee. Keep the
+submitter's payer keypair (`SOLANA_PAYER_KEYPAIR_PATH`) funded for this.
+
+Send it with `nori-cli` from the repo root. With `--proof`, the store hash,
+queue address, `latest_head` and `queue_cursor` come from the first `update`
+proof's input side, and the CLI checks that the proof's vkey matches the
+`nori_bridge_vk` `initialize` pins; without `--proof`, pass all six fields
+(`--latest-helios-store-input-hash`, `--eth-proof-queue-address`,
+`--latest-head`, `--queue-cursor`).
+
+```bash
+cargo run -p nori-cli -- initialize \
+    --url <rpc-url> \
+    --keypair <payer-keypair.json> \
+    --proof <first-update-proof.json> \
+    --verified-state-root <initialVerifiedStateRoot> \
+    --eth-token-bridge-address <EthBridge> \
+    --dry-run   # remove to send; asks for confirmation unless --yes
+```
+
+`--url`, `--keypair` and `--program-id` fall back to
+`SOLANA_RPC_NETWORK_URL`, `SOLANA_PAYER_KEYPAIR_PATH` and
+`NORI_SOL_TOKEN_PROGRAM_ID` (a `.env` in the working directory is read);
+`--program-id` defaults to the program's declared id. The CLI refuses when no
+executable program is at the program id or the state PDA already exists, and
+prints the state and mint PDAs, the init values and the tx signature for the
+record below.
 
 ### Record
 
 - [ ] Initialize tx signature
 - [ ] State PDA, mint PDA addresses
+- [ ] Submitter payer pubkey and its funding source
 
 ---
 
@@ -256,6 +285,4 @@ pub struct NoriSolTokenBridgeInit {
 
 ## Appendix B — Open tooling gaps
 
-- [ ] Initialize CLI / script for the Solana program (§6); until then,
-      `SolanaProofSubmitter::build_initialize_instruction` covers it.
 - [ ] Dry-run script proposing a no-op admin call through the Timelock (§7.2).
