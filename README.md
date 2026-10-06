@@ -124,6 +124,7 @@ The SBF toolchain ships rustc 1.89, so the alloy tree is pinned to 1.6.3
 |---|---|
 | `programs/token` | The on-chain program: `initialize`, `update`, `mint` |
 | `proof-submitter` | Client crate: loads SP1 proof JSONs, submits `update` txs over RPC (`SolanaProofSubmitter`), surfpool e2e suite |
+| `cli` | `nori-cli` operator binary: `initialize` for an already deployed program (`cargo run -p nori-cli -- initialize --help`) |
 | `test-utils` | Surfpool test harness shared by the suites and downstream crates: validator with kill-on-drop, funded keypairs, CLI deploy, custom error codes |
 | `nori-hash-utils` | Standalone crate compiled to WebAssembly: nori-hash's request leaf and Merkle witness hashing for the TS SDK |
 

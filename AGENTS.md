@@ -26,6 +26,7 @@ baseline, scoped down for this route: one-way, lock only, no unlock path.
 | `ethereum/types/ethers-contracts/` | **Generated** by `hardhat compile`; committed after `stabilize-types.mjs` sorts unstable lines. Never hand-edit |
 | `programs/token/` | Anchor program: `initialize`, `update`, `mint` + zero-copy state and append-only proof queue batch PDAs |
 | `proof-submitter/` | Client crate: proof-JSON loader + `SolanaProofSubmitter` (RPC `update` sender) |
+| `cli/` | `nori-cli` operator binary on top of `proof-submitter`: `initialize` for an already deployed program (DEPLOYMENT.md §6) |
 | `idl/`, `sdk/src/program/` | **Generated** from `programs/token` by `anchor idl build` and Codama (sdk/README.md "How to regenerate the Solana client"). Never hand-edit; regenerate with the program change |
 | `nori-hash-utils/` | Standalone crate (own Cargo workspace and lock) compiling nori-bridge-head's `nori-hash` to WebAssembly with `wasm-bindgen` + `tsify`; `pkg/` is build output |
 | `test-utils/` | Surfpool test harness (validator kill-on-drop, funded keypairs, CLI deploy, custom error codes); no dependency on `token`, so the program's own tests can use it |
@@ -46,6 +47,7 @@ cd ..   # repo root
 CFLAGS="-isystem $HOME/.cache/solana/v1.54/platform-tools/llvm/sbpf/include" \
     cargo build-sbf --manifest-path programs/token/Cargo.toml   # → target/deploy/token.so
 cargo test                # surfpool suites (needs surfpool + solana CLI on PATH)
+cargo run -p nori-cli -- initialize --help   # one-off initialize of a deployed program
 cargo clippy --workspace --all-targets   # clean
 cargo fmt --all --check                  # clean
 ```

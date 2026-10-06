@@ -6,8 +6,9 @@ proof JSONs — as produced by
 on-chain wire format and submits `update` transactions to the deployed
 token program over JSON-RPC.
 
-Library only: there is no CLI/binary yet; submission is driven from
-nori-bridge-head's submitter side.
+Library only: `update` submission is driven from nori-bridge-head's
+submitter side. The one-off `initialize` of a deployed program is sent
+with `nori-cli` (`cli/`, DEPLOYMENT.md §6), built on this crate.
 
 ## Loading proofs
 
@@ -44,6 +45,8 @@ Wire format, from the proof JSON fields:
   deploy). Dev/test convenience: sequential, no resume. Production deploys
   should use the CLI below, which batches in parallel and resumes.
 - `build_initialize_instruction(init_values)` — one-off bridge setup.
+- `state_address()` / `mint_address()` — the state (`[b"STATE"]`) and
+  mint (`[b"NETH"]`) PDAs for the configured program id.
 - `submit_initialize(init_values).await` — sends and confirms the one-off
   `initialize` transaction (creates the state PDA and the token mint). The
   init values come from the first proof:
@@ -127,7 +130,10 @@ export SOLANA_RPC_NETWORK_URL=http://127.0.0.1:8899
 export SOLANA_PAYER_KEYPAIR_PATH=$HOME/.config/solana/id.json
 ```
 
-Then initialize the bridge with the first proof's init values
-(`proofs[0].bridge_init(verified_state_root, eth_token_bridge_address)` via
-`submit_initialize`) and call `submit_update` per proof — see
+Then initialize the bridge with the first proof's init values — from the
+repo root, `cargo run -p nori-cli -- initialize --proof <first proof>
+--verified-state-root <root> --eth-token-bridge-address <addr>` (it reads
+the two variables above), or in Rust
+`proofs[0].bridge_init(verified_state_root, eth_token_bridge_address)` via
+`submit_initialize` — and call `submit_update` per proof; see
 `tests/update_surfpool.rs` for the full sequence.

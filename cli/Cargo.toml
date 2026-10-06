@@ -1,0 +1,19 @@
+[package]
+name = "nori-cli"
+version = "0.1.0"
+description = "Operator CLI for a deployed Nori Solana token bridge program"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+proof-submitter = { path = "../proof-submitter" }
+token = { path = "../programs/token" }
+nori-elf = { git = "https://github.com/Nori-zk/nori-bridge-head", branch = "FEAT/solana-bridge" }
+alloy-primitives = "1.7.1"
+anchor-lang = "1.1.2"
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+dotenvy = "0.15"
+solana-rpc-client = "3.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -12,4 +12,6 @@ pub mod proof_file;
 pub mod submitter;
 
 pub use proof_file::{load_update_proof, load_update_proofs_dir, LoadedProof, ProofFileError};
-pub use submitter::{SolanaProofSubmitter, SolanaTransactionResult, SubmitterError};
+pub use submitter::{
+    read_keypair_file, SolanaProofSubmitter, SolanaTransactionResult, SubmitterError,
+};
