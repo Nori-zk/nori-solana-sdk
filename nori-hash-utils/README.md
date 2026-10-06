@@ -26,5 +26,6 @@ npm run build -w @nori-zk/nori-hash-utils
 ```
 
 This runs `wasm-pack build --no-pack --features wasm` into `pkg/`. The crate
-is standalone, with its own Cargo workspace and lock, and depends on
-`nori-hash` from nori-bridge-head's `FEAT/solana-bridge` branch.
+is a member of the SDK's Cargo workspace and shares its lock, and depends on
+`nori-hash` from nori-bridge-head's `FEAT/solana-bridge-sepolia-glamsterdam`
+branch without its default `helios` feature.

@@ -22,11 +22,11 @@ use {
 
 const PROOFS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/example-proofs");
 const PROGRAM_SO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../target/deploy/token.so");
-const SLOT_1: u64 = 11_247_360;
-const SLOT_2: u64 = 11_247_392;
-const SLOT_3: u64 = 11_247_424;
-const SLOT_4: u64 = 11_247_456;
-const BLOCK_1: u64 = 11_808_937;
+const SLOT_1: u64 = 11_298_144;
+const SLOT_2: u64 = 11_298_176;
+const SLOT_3: u64 = 11_298_208;
+const SLOT_4: u64 = 11_298_240;
+const BLOCK_1: u64 = 11_857_617;
 
 // Anchor custom error codes: 6000 + NoriSolTokenBridgeError variant index, as they
 // appear in RPC error text ("custom program error: 0x1774").

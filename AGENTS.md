@@ -28,7 +28,7 @@ baseline, scoped down for this route: one-way, lock only, no unlock path.
 | `proof-submitter/` | Client crate: proof-JSON loader + `SolanaProofSubmitter` (RPC `update` sender) |
 | `cli/` | `nori-cli` operator binary on top of `proof-submitter`: `initialize` for an already deployed program (DEPLOYMENT.md §6) |
 | `idl/`, `sdk/src/program/` | **Generated** from `programs/token` by `anchor idl build` and Codama (sdk/README.md "How to regenerate the Solana client"). Never hand-edit; regenerate with the program change |
-| `nori-hash-utils/` | Standalone crate (own Cargo workspace and lock) compiling nori-bridge-head's `nori-hash` to WebAssembly with `wasm-bindgen` + `tsify`; `pkg/` is build output |
+| `nori-hash-utils/` | Workspace crate compiling nori-bridge-head's `nori-hash` (without its default `helios` feature) to WebAssembly with `wasm-bindgen` + `tsify`; `pkg/` is build output |
 | `test-utils/` | Surfpool test harness (validator kill-on-drop, funded keypairs, CLI deploy, custom error codes); no dependency on `token`, so the program's own tests can use it |
 | `proof-submitter/example-proofs/` | Four chained SP1 Groth16 proofs (no deposits) used by the test suites |
 | `DEPLOYMENT.md` | Production runbook (Safe → Timelock → ETH contracts → Solana program) |
@@ -57,6 +57,11 @@ cargo fmt --all --check                  # clean
 - **Alloy MSRV**: the SBF toolchain ships rustc 1.89; alloy 1.7+ requires
   1.91. Cargo.lock pins the alloy tree to 1.6.3 (MSRV 1.88). Do not
   `cargo update` the alloy crates past that without an SBF toolchain bump.
+- **Helios feature**: nori-bridge-head's helios 0.12.0 depends on alloy 2.x,
+  which requires rustc 1.94.1. The root `Cargo.toml` takes
+  `nori-sp1-helios-primitives` and `nori-hash` with `default-features = false`,
+  leaving out their `helios` feature, so neither helios nor alloy 2.x enters
+  the lock. Keep it that way without an SBF toolchain bump.
 - **getrandom 0.2** (via rand_core ← k256/bls12_381) has no backend cfg for
   the sbpf target; `programs/token/Cargo.toml` forces its `custom` feature,
   which unifies across the graph. Nothing on-chain calls getrandom.

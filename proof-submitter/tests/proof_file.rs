@@ -13,7 +13,7 @@ use {
 };
 
 const PROOFS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/example-proofs");
-const SLOTS: [u64; 4] = [11_247_328, 11_247_360, 11_247_392, 11_247_424];
+const SLOTS: [u64; 4] = [11_298_112, 11_298_144, 11_298_176, 11_298_208];
 
 fn load_proofs() -> Vec<LoadedProof> {
     load_update_proofs_dir(PROOFS_DIR).expect("example proofs must parse")
@@ -52,7 +52,7 @@ fn example_proofs_load_and_chain() {
 fn load_update_proof_reports_bad_files() {
     let good = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/example-proofs/11247328-v6.1.0.json"
+        "/example-proofs/11298112-v6.1.0.json"
     ))
     .unwrap();
 

@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "cli",
+    "nori-hash-utils",
     "programs/*",
     "proof-submitter",
     "test-utils",
@@ -10,6 +11,36 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 rust-version = "1.89.0"
+
+[workspace.dependencies]
+# workspace crates
+token = { path = "programs/token" }
+proof-submitter = { path = "proof-submitter" }
+test-utils = { path = "test-utils" }
+
+# nori
+nori-elf = { git = "https://github.com/Nori-zk/nori-bridge-head", branch = "FEAT/solana-bridge-sepolia-glamsterdam" }
+nori-hash = { git = "https://github.com/Nori-zk/nori-bridge-head", branch = "FEAT/solana-bridge-sepolia-glamsterdam", default-features = false }
+nori-sp1-helios-primitives = { git = "https://github.com/Nori-zk/nori-bridge-head", branch = "FEAT/solana-bridge-sepolia-glamsterdam", default-features = false }
+sp1-solana = { git = "https://github.com/Nori-zk/sp1-solana", branch = "feat/sp1-v6-groth16-master-typed" }
+
+# anchor
+anchor-lang = "1.1.2"
+anchor-spl = "1.1.2"
+
+# solana
+solana-rpc-client = "3.1"
+solana-keypair = "3.0.1"
+solana-message = "3.0.1"
+solana-signer = "3.0.0"
+solana-transaction = "3.0.2"
+
+# general
+alloy-primitives = "1.7.1"
+bytemuck = "1"
+dotenvy = "0.15"
+serde_json = "1"
+tokio = "1"
 
 [profile.release]
 overflow-checks = true
