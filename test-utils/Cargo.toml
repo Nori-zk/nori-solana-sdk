@@ -6,8 +6,13 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+base64 = { workspace = true }
 serde_json = { workspace = true }
+solana-instruction = { workspace = true }
 solana-keypair = { workspace = true }
+solana-message = { workspace = true }
+solana-pubkey = { workspace = true }
 solana-rpc-client = { workspace = true }
 solana-signer = { workspace = true }
+solana-transaction = { workspace = true }
 tokio = { workspace = true, features = ["time"] }

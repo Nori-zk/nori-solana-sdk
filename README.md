@@ -94,9 +94,13 @@ deployed program (`cargo run -p nori-cli -- initialize --help`).
 
 ### `test-utils/`
 
-[lib.rs](test-utils/src/lib.rs): surfpool harness shared by the suites —
-validator with kill-on-drop, funded keypairs, CLI deploy, custom error
-codes.
+[lib.rs](test-utils/src/lib.rs): surfpool harness shared by the suites and
+by apps built on the program —
+validator with kill-on-drop, funded keypairs, CLI deploy (at the `.so`'s own
+id, or at a given program keypair's with `deploy_program_at`), surfpool
+cheatcodes (`set_account`, `time_travel`), `send` (simulate, then send and
+confirm; returns compute units, transaction bytes, return data, logs and the
+`Program data:` payloads) and custom error codes (`error_code`).
 
 ## Install & build
 

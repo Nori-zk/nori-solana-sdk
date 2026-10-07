@@ -29,7 +29,7 @@ baseline, scoped down for this route: one-way, lock only, no unlock path.
 | `cli/` | `nori-cli` operator binary on top of `proof-submitter`: `initialize` for an already deployed program (DEPLOYMENT.md §6) |
 | `idl/`, `sdk/src/program/` | **Generated** from `programs/token` by `anchor idl build` and Codama (sdk/README.md "How to regenerate the Solana client"). Never hand-edit; regenerate with the program change |
 | `nori-hash-utils/` | Workspace crate compiling nori-bridge-head's `nori-hash` (without its default `helios` feature) to WebAssembly with `wasm-bindgen` + `tsify`; `pkg/` is build output |
-| `test-utils/` | Surfpool test harness (validator kill-on-drop, funded keypairs, CLI deploy, custom error codes); no dependency on `token`, so the program's own tests can use it |
+| `test-utils/` | Surfpool test harness (validator kill-on-drop, funded keypairs, CLI deploy incl. at a given program id, `set_account`/`time_travel` cheatcodes, `send` with compute units and logs, custom error codes); no dependency on `token` or Anchor, so the program's own tests and apps built on it can use it |
 | `proof-submitter/example-proofs/` | Four chained SP1 Groth16 proofs (no deposits) used by the test suites |
 | `DEPLOYMENT.md` | Production runbook (Safe → Timelock → ETH contracts → Solana program) |
 | `DEVELOPMENT_GUIDE.md` | Toolchain setup (Solana CLI, Anchor, Surfpool) |

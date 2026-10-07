@@ -5143,10 +5143,15 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 name = "test-utils"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "serde_json",
+ "solana-instruction 3.5.1",
  "solana-keypair",
+ "solana-message",
+ "solana-pubkey 3.0.0",
  "solana-rpc-client",
  "solana-signer",
+ "solana-transaction",
  "tokio",
 ]
 

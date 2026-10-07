@@ -1,15 +1,21 @@
 //! Shared harness for tests that run against a local Surfnet validator
 //! (surfpool): start a validator on free ports with kill-on-drop, fund
 //! keypairs, read Solana CLI keypair files, deploy a program through the
-//! Solana CLI, and read Anchor custom error codes out of RPC errors.
+//! Solana CLI (at its own id or a given keypair's), write accounts and move
+//! the clock with surfpool's cheatcodes, send an instruction and measure it,
+//! and read Anchor custom error codes out of RPC errors.
 //!
-//! Requires `surfpool` (and, for [`deploy_program_with_cli`], `solana`) on
-//! PATH.
+//! Requires `surfpool` (and, for the deploy helpers, `solana`) on PATH.
 
 use {
+    base64::{engine::general_purpose::STANDARD as BASE64, Engine},
+    solana_instruction::Instruction,
     solana_keypair::Keypair,
-    solana_rpc_client::nonblocking::rpc_client::RpcClient,
+    solana_message::{Message, VersionedMessage},
+    solana_pubkey::Pubkey,
+    solana_rpc_client::{api::request::RpcRequest, nonblocking::rpc_client::RpcClient},
     solana_signer::Signer,
+    solana_transaction::versioned::VersionedTransaction,
     std::{
         net::TcpListener,
         path::Path,
@@ -156,6 +162,27 @@ pub fn read_keypair_file(path: impl AsRef<Path>) -> Keypair {
 /// program id is the keypair the Solana CLI finds next to the `.so`
 /// (`<name>-keypair.json`).
 pub fn deploy_program_with_cli(surfpool: &Surfpool, payer: &Keypair, program_so: impl AsRef<Path>) {
+    deploy(surfpool, payer, program_so.as_ref(), None);
+}
+
+/// [`deploy_program_with_cli`] at the id of `program_keypair` (a Solana CLI
+/// keypair file), so a program lands at its `declare_id!` wherever its
+/// `.so` was built.
+pub fn deploy_program_at(
+    surfpool: &Surfpool,
+    payer: &Keypair,
+    program_so: impl AsRef<Path>,
+    program_keypair: impl AsRef<Path>,
+) {
+    deploy(
+        surfpool,
+        payer,
+        program_so.as_ref(),
+        Some(program_keypair.as_ref()),
+    );
+}
+
+fn deploy(surfpool: &Surfpool, payer: &Keypair, program_so: &Path, program_keypair: Option<&Path>) {
     let payer_path = std::env::temp_dir().join(format!(
         "nori-test-payer-{}-{}.json",
         std::process::id(),
@@ -163,10 +190,12 @@ pub fn deploy_program_with_cli(surfpool: &Surfpool, payer: &Keypair, program_so:
     ));
     let bytes: Vec<u8> = payer.to_bytes().to_vec();
     std::fs::write(&payer_path, serde_json::to_string(&bytes).unwrap()).unwrap();
-    let deploy = Command::new("solana")
-        .arg("program")
-        .arg("deploy")
-        .arg(program_so.as_ref())
+    let mut command = Command::new("solana");
+    command.arg("program").arg("deploy").arg(program_so);
+    if let Some(program_keypair) = program_keypair {
+        command.arg("--program-id").arg(program_keypair);
+    }
+    let deploy = command
         .args([
             "-k",
             payer_path.to_str().unwrap(),
@@ -198,4 +227,126 @@ pub fn custom_error_code(error_text: &str) -> u32 {
         .take_while(|c| c.is_ascii_hexdigit())
         .collect::<String>();
     u32::from_str_radix(&hex, 16).expect("hex error code")
+}
+
+/// Write an account with surfpool's `surfnet_setAccount` cheatcode: `data`,
+/// owned by `owner`, rent-exempt and not executable.
+pub async fn set_account(client: &RpcClient, address: &Pubkey, owner: &Pubkey, data: &[u8]) {
+    let lamports = client
+        .get_minimum_balance_for_rent_exemption(data.len())
+        .await
+        .expect("rent-exempt minimum");
+    let hex: String = data.iter().map(|byte| format!("{byte:02x}")).collect();
+    cheatcode(
+        client,
+        "surfnet_setAccount",
+        serde_json::json!([
+            address.to_string(),
+            {
+                "lamports": lamports,
+                "data": hex,
+                "owner": owner.to_string(),
+                "executable": false,
+            }
+        ]),
+    )
+    .await;
+}
+
+/// Move the validator clock to `unix_time` (seconds) with surfpool's
+/// `surfnet_timeTravel` cheatcode. Surfpool only travels forward.
+pub async fn time_travel(client: &RpcClient, unix_time: i64) {
+    cheatcode(
+        client,
+        "surfnet_timeTravel",
+        serde_json::json!([{ "absoluteTimestamp": unix_time * 1000 }]),
+    )
+    .await;
+}
+
+async fn cheatcode(client: &RpcClient, method: &'static str, params: serde_json::Value) {
+    client
+        .send::<serde_json::Value>(RpcRequest::Custom { method }, params)
+        .await
+        .unwrap_or_else(|e| panic!("{method}: {e}"));
+}
+
+/// What a confirmed transaction cost and produced.
+pub struct Sent {
+    pub compute_units: u64,
+    pub transaction_bytes: usize,
+    pub return_data: Vec<u8>,
+    pub logs: Vec<String>,
+}
+
+impl Sent {
+    /// The payloads of the `Program data:` log lines, in order. An Anchor
+    /// event is one of these, starting with its 8-byte discriminator.
+    pub fn program_data(&self) -> Vec<Vec<u8>> {
+        self.logs
+            .iter()
+            .filter_map(|log| log.strip_prefix("Program data: "))
+            .map(|data| BASE64.decode(data).expect("base64 program data"))
+            .collect()
+    }
+}
+
+/// Simulate `instruction` (paid by `payer`, also signed by `signers`), then
+/// send and confirm it. On failure, the error text is the simulation's logs
+/// (or the RPC error), so [`custom_error_code`] reads the code from it.
+pub async fn send(
+    client: &RpcClient,
+    payer: &Keypair,
+    instruction: Instruction,
+    signers: &[&Keypair],
+) -> Result<Sent, String> {
+    let blockhash = client
+        .get_latest_blockhash()
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    let mut all_signers = vec![payer];
+    all_signers.extend(signers.iter().filter(|s| s.pubkey() != payer.pubkey()));
+    let message = Message::new_with_blockhash(&[instruction], Some(&payer.pubkey()), &blockhash);
+    let transaction =
+        VersionedTransaction::try_new(VersionedMessage::Legacy(message), &all_signers)
+            .map_err(|e| format!("{e:?}"))?;
+
+    let simulation = client
+        .simulate_transaction(&transaction)
+        .await
+        .map_err(|e| format!("{e:?}"))?
+        .value;
+    let logs = simulation.logs.unwrap_or_default();
+    if simulation.err.is_some() {
+        return Err(logs.join("\n"));
+    }
+    client
+        .send_and_confirm_transaction(&transaction)
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    Ok(Sent {
+        compute_units: simulation.units_consumed.unwrap_or_default(),
+        transaction_bytes: 1
+            + 64 * transaction.signatures.len()
+            + transaction.message.serialize().len(),
+        return_data: simulation
+            .return_data
+            .map(|data| BASE64.decode(data.data.0).expect("base64 return data"))
+            .unwrap_or_default(),
+        logs,
+    })
+}
+
+/// The custom program error code of an `instruction` that must fail.
+pub async fn error_code(
+    client: &RpcClient,
+    payer: &Keypair,
+    instruction: Instruction,
+    signers: &[&Keypair],
+) -> u32 {
+    let error = send(client, payer, instruction, signers)
+        .await
+        .err()
+        .expect("the instruction must fail");
+    custom_error_code(&error)
 }
