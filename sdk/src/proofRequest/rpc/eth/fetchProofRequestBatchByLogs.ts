@@ -1,20 +1,8 @@
 import { NoriProofRequestQueue__factory } from '@nori-zk/ethereum-solana-bridge';
 import type { EthereumProvider } from '@nori-zk/ethereum-solana-bridge/iso-provider';
-import { withBackoff, type ProofRequestRecord } from './fetchProofRequestBatch.js';
-
-/**
- * Max blocks per `ProofRequested` log query, kept under typical provider
- * block-range and result-count limits.
- */
-const MAX_BLOCK_RANGE_PER_QUERY = 2000;
-
-function blockRangeChunks(from: number, to: number, size: number): [number, number][] {
-    const chunks: [number, number][] = [];
-    for (let start = from; start <= to; start += size) {
-        chunks.push([start, Math.min(start + size - 1, to)]);
-    }
-    return chunks;
-}
+import { withBackoff } from '../withBackoff.js';
+import { blockRanges, MAX_BLOCK_RANGE_PER_QUERY } from './blockRanges.js';
+import { type ProofRequestRecord } from './fetchProofRequestBatch.js';
 
 /**
  * Reads every `NoriProofRequestQueue` record with id in
@@ -40,10 +28,11 @@ export default async function fetchProofRequestBatchByLogs(
     const queue = NoriProofRequestQueue__factory.connect(proofQueueAddress, provider);
 
     const records: ProofRequestRecord[] = [];
-    for (const [chunkFrom, chunkTo] of blockRangeChunks(
+    for (const [chunkFrom, chunkTo] of blockRanges(
         fromBlock,
         toBlock,
-        MAX_BLOCK_RANGE_PER_QUERY
+        MAX_BLOCK_RANGE_PER_QUERY,
+        'asc'
     )) {
         const logs = await withBackoff(() =>
             queue.queryFilter(queue.filters.ProofRequested(), chunkFrom, chunkTo)

@@ -32,12 +32,12 @@ const subscribeTimingsTransition = {
  *
  * Automatically unsubscribes from heartbeat pings on socket close.
  *
- * @param url WebSocket server URL (default: wss://wss.nori.it.com)
+ * @param url WebSocket server URL (default: wss://wss.solana.nori.it.com')
  * @param heartBeatInterval Interval for heartbeat pings in ms (default: 3000)
  * @returns A filtered WebSocketSubject that emits structured subscription messages.
  */
 export function getBridgeSocket$(
-    url: string = 'wss://wss.nori.it.com',
+    url: string = 'wss://wss.solana.nori.it.com',
     heartBeatInterval: number = 3000
 ) {
     const heartBeatPing = interval(heartBeatInterval).pipe(
@@ -81,7 +81,7 @@ export function getBridgeSocket$(
  * - Subscribes to key bridge-related topics on connection
  * - Filters out pong replies from message stream
  *
- * @param url WebSocket server URL (default: wss://wss.nori.it.com)
+ * @param url WebSocket server URL (default: wss://wss.solana.nori.it.com)
  * @param heartBeatInterval Interval in ms for sending pings (default: 3000)
  * @param pongTimeoutMultiplier Multiplier to determine allowed pong delay before reconnection (default: 2)
  * @returns An object containing:
@@ -89,7 +89,7 @@ export function getBridgeSocket$(
  *   - `bridgeSocketConnectionState$`: connection state observable
  */
 export function getReconnectingBridgeSocket$(
-    url: string = 'wss://wss.nori.it.com',
+    url: string = 'wss://wss.solana.nori.it.com',
     heartBeatInterval: number = 3000,
     pongTimeoutMultiplier: number = 2
 ) {

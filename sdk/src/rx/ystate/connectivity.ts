@@ -13,7 +13,7 @@ export type BridgeSocketConnectionState =
  *
  * - `connecting` to `open` when the socket opens, or to `closed` when the attempt fails.
  * - `open` to `closed` on close, error, or a missed pong (`forceReconnect`).
- * - `closed` to `reconnecting` while retries remain, or to `permanently-closed` once they run out.
+ * - `closed` to `reconnecting` while retries remain, or to `permanentlyClosed` once they run out.
  * - `reconnecting` to `connecting` when the backoff timer fires.
  */
 export const BridgeSocketConnectivityGraph = define({
@@ -22,7 +22,7 @@ export const BridgeSocketConnectivityGraph = define({
         open: {},
         closed: {},
         reconnecting: {},
-        'permanently-closed': {},
+        permanentlyClosed: {},
     },
     edges: {
         opened: {
@@ -47,7 +47,7 @@ export const BridgeSocketConnectivityGraph = define({
         },
         retriesExhausted: {
             from: 'closed',
-            to: 'permanently-closed',
+            to: 'permanentlyClosed',
             on: 'socketPermanentlyClosed.next',
         },
         reconnectStarted: {

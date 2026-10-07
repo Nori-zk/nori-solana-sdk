@@ -2,11 +2,9 @@ import {
     getEthereumProvider,
     type EthereumProvider,
 } from '@nori-zk/ethereum-solana-bridge/iso-provider';
+import { withBackoff } from '../withBackoff.js';
 import fetchProofRequestBatchByLogs from './fetchProofRequestBatchByLogs.js';
 import fetchProofRequestBatchByCall from './fetchProofRequestBatchByCall.js';
-
-const MAX_RETRIES = 5;
-const BASE_BACKOFF_MS = 500;
 
 export interface ProofRequestBatchEntry {
     target: string;
@@ -21,18 +19,6 @@ export interface ProofRequestRecord {
     slotKey: string;
     collectionKeysCount: number;
     collectionKeys: string[];
-}
-
-/** Retries `fn` with exponential backoff, throwing the last error once `MAX_RETRIES` is reached. */
-export async function withBackoff<T>(fn: () => Promise<T>): Promise<T> {
-    for (let attempt = 0; ; attempt++) {
-        try {
-            return await fn();
-        } catch (error) {
-            if (attempt >= MAX_RETRIES) throw error;
-            await new Promise((resolve) => setTimeout(resolve, BASE_BACKOFF_MS * 2 ** attempt));
-        }
-    }
 }
 
 /**

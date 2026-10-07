@@ -7,6 +7,7 @@ import {
 import { findStatePda } from '../../../program/pdas/state.js';
 import { TOKEN_PROGRAM_ADDRESS } from '../../../program/programs/token.js';
 import { assertProgramAccount } from './accountChecks.js';
+import { withSolanaRpcTransportErrors } from './errors.js';
 
 /**
  * Reads the bridge state account at `finalized` commitment.
@@ -20,7 +21,9 @@ export async function fetchBridgeState(
     programAddress: Address = TOKEN_PROGRAM_ADDRESS
 ): Promise<NoriSolTokenBridge> {
     const [address] = await findStatePda({ programAddress });
-    const account = await fetchNoriSolTokenBridge(rpc, address, { commitment: 'finalized' });
+    const account = await withSolanaRpcTransportErrors('Reading the bridge state', () =>
+        fetchNoriSolTokenBridge(rpc, address, { commitment: 'finalized' })
+    );
     assertProgramAccount(account, programAddress, NORI_SOL_TOKEN_BRIDGE_DISCRIMINATOR);
     return account.data;
 }

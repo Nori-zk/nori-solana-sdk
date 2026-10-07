@@ -1,7 +1,8 @@
 import { Contract } from 'ethers';
 import { NoriProofRequestQueue__factory } from '@nori-zk/ethereum-solana-bridge';
 import type { EthereumProvider } from '@nori-zk/ethereum-solana-bridge/iso-provider';
-import { withBackoff, type ProofRequestRecord } from './fetchProofRequestBatch.js';
+import { withBackoff } from '../withBackoff.js';
+import { type ProofRequestRecord } from './fetchProofRequestBatch.js';
 
 /**
  * Canonical Multicall3 deployment address, identical across virtually every

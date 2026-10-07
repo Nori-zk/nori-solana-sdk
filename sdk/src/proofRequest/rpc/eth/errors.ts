@@ -19,6 +19,14 @@ export class MalformedProofRequestError extends Error {
     }
 }
 
+/** The transaction that enqueues a proof request has no receipt yet: it is not mined. */
+export class ProofRequestTransactionNotMinedError extends Error {
+    constructor(readonly transactionHash: string) {
+        super(`Transaction ${transactionHash} is not mined yet.`);
+        this.name = 'ProofRequestTransactionNotMinedError';
+    }
+}
+
 export class EthDataNotFoundError extends Error {
     constructor(message: string) {
         super(message);

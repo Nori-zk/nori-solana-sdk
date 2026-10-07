@@ -1600,6 +1600,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ethereum-solana-proof-queue-utils-glam"
+version = "0.0.1"
+dependencies = [
+ "alloy-primitives",
+ "nori-hash",
+ "serde",
+ "serde-wasm-bindgen",
+ "tsify",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "fastrlp"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2520,18 +2532,6 @@ dependencies = [
  "alloy-primitives",
  "anyhow",
  "sha2 0.10.8",
-]
-
-[[package]]
-name = "nori-hash-utils"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives",
- "nori-hash",
- "serde",
- "serde-wasm-bindgen",
- "tsify",
- "wasm-bindgen",
 ]
 
 [[package]]

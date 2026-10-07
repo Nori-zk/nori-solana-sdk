@@ -5,7 +5,6 @@
     "type": "module",
     "workspaces": [
         "ethereum",
-        "nori-hash-utils",
         "sdk"
     ],
     "devDependencies": {
@@ -25,7 +24,12 @@
         "typescript-eslint": "^8.55.0"
     },
     "scripts": {
-        "build": "npm run build --workspaces --if-present",
+        "preinstall": "npm run install:sbf-tools",
+        "install:sbf-tools": "cargo build-sbf --install-only --force-tools-install --tools-version v1.54",
+        "build:program": "CFLAGS=\"-isystem $HOME/.cache/solana/v1.54/platform-tools/llvm/sbpf/include\" cargo build-sbf --manifest-path programs/token/Cargo.toml",
+        "build:idl": "anchor idl build -p token -o idl/token.json -t idl/token.ts -- --locked",
+        "build:js": "npm run build --workspaces --if-present",
+        "build": "npm run build:program && npm run build:idl && npm run build:js",
         "lint": "npm run lint --workspaces --if-present",
         "format": "npm run format --workspaces --if-present",
         "test": "npm run test --workspaces --if-present",

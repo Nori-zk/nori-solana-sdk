@@ -1,4 +1,4 @@
-//! WebAssembly bindings for nori-hash-utils.
+//! WebAssembly bindings for ethereum-solana-proof-queue-utils-glam.
 //!
 //! This module provides wasm-bindgen exported functions for use from JavaScript.
 

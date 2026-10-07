@@ -1,8 +1,8 @@
 [package]
-name = "nori-hash-utils"
-version = "0.1.0"
+name = "ethereum-solana-proof-queue-utils-glam"
+version = "0.0.1"
 edition = "2021"
-license = "MIT"
+license = "Apache-2.0"
 
 [lib]
 name = "nori_hash_utils"

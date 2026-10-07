@@ -1,4 +1,4 @@
-# @nori-zk/nori-hash-utils
+# @nori-zk/ethereum-solana-proof-queue-utils-glam
 
 Proof queue request leaf and Merkle witness hashing for the Nori bridge,
 compiled to WebAssembly from `nori-hash`, the code the SP1 guest runs to
@@ -17,15 +17,20 @@ here verifies against the batch root the Solana program stores.
 All values are 0x-prefixed hex. Types and their docs are in
 `pkg/nori_hash_utils.d.ts`, generated from the Rust with `tsify`.
 
-## Build
+## Build for wasm
 
-From the nori-solana-sdk root (see its README for prerequisites):
+`./build.sh`
 
-```bash
-npm run build -w @nori-zk/nori-hash-utils
-```
-
-This runs `wasm-pack build --no-pack --features wasm` into `pkg/`. The crate
+This runs `wasm-pack build --features wasm` into `pkg/`. The crate
 is a member of the SDK's Cargo workspace and shares its lock, and depends on
 `nori-hash` from nori-bridge-head's `FEAT/solana-bridge-sepolia-glamsterdam`
 branch without its default `helios` feature.
+
+## Release npm package
+
+After building for wasm `cd pkg && npm publish`
+
+## Troubleshooting
+
+1. Conflicting binaryen
+   - `sudo apt remove binaryen`

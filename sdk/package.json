@@ -4,6 +4,11 @@
     "description": "Nori bridge Solana SDK: track Ethereum proof requests through the bridge to Solana and build their witnesses",
     "author": "",
     "license": "Apache-2.0",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/Nori-zk/nori-solana-sdk.git",
+        "directory": "sdk"
+    },
     "keywords": [
         "nori",
         "bridge",
@@ -39,8 +44,8 @@
     },
     "scripts": {
         "clean": "rimraf build",
+        "prebuild": "npm run generate:client",
         "build": "npm run clean && tsc",
-        "build:cache-layouts": "node --experimental-vm-modules build/bin/buildCacheServerLayouts.js",
         "buildw": "tsc --watch",
         "coverage": "node --experimental-vm-modules ../node_modules/jest/bin/jest.js --coverage --runInBand",
         "format": "prettier --check --ignore-unknown **/*",
@@ -79,7 +84,7 @@
     },
     "dependencies": {
         "@nori-zk/ethereum-solana-bridge": "*",
-        "@nori-zk/nori-hash-utils": "*",
+        "@nori-zk/ethereum-solana-proof-queue-utils-glam": "0.0.1",
         "@nori-zk/pts-types": "7.0.2",
         "@yaw-rx/ystate": "^0.0.2",
         "esm-iso-logger": "1.0.2",

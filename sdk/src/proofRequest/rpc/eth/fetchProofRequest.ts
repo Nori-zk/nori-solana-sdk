@@ -3,7 +3,12 @@ import {
     getEthereumProvider,
     type EthereumProvider,
 } from '@nori-zk/ethereum-solana-bridge/iso-provider';
-import { EthDataNotFoundError } from './errors.js';
+import { withBackoff } from '../withBackoff.js';
+import {
+    EthDataNotFoundError,
+    EthRpcTransportError,
+    ProofRequestTransactionNotMinedError,
+} from './errors.js';
 
 export interface ProofRequest {
     requestId: bigint;
@@ -22,7 +27,10 @@ export interface ProofRequest {
  * @param proofRequestTxHash The hash of the Ethereum transaction that enqueued the request.
  * @param provider The Ethereum provider used to retrieve the transaction receipt.
  * @returns The proof request decoded from the matching `ProofRequested` log.
- * @throws When the transaction receipt is unavailable or contains no matching log.
+ * @throws EthRpcTransportError When reading the receipt still fails after its retries.
+ * @throws ProofRequestTransactionNotMinedError When the transaction has no receipt yet.
+ * @throws EthDataNotFoundError When its receipt contains no `ProofRequested`
+ *   log from the queue: the wrong transaction or the wrong queue address.
  */
 export async function findRequestIdByTxHash(
     proofQueueAddress: string,
@@ -30,9 +38,16 @@ export async function findRequestIdByTxHash(
     provider: EthereumProvider = getEthereumProvider()
 ): Promise<ProofRequest> {
     const queue = NoriProofRequestQueue__factory.connect(proofQueueAddress, provider);
-    const receipt = await provider.getTransactionReceipt(proofRequestTxHash);
+    const receipt = await withBackoff(() =>
+        provider.getTransactionReceipt(proofRequestTxHash)
+    ).catch((error: unknown) => {
+        throw new EthRpcTransportError(
+            `Reading the receipt of ${proofRequestTxHash} failed.`,
+            error
+        );
+    });
     if (!receipt) {
-        throw new EthDataNotFoundError(`No transaction receipt found for ${proofRequestTxHash}.`);
+        throw new ProofRequestTransactionNotMinedError(proofRequestTxHash);
     }
     for (const log of receipt.logs) {
         if (log.address.toLowerCase() !== proofQueueAddress.toLowerCase()) continue;
