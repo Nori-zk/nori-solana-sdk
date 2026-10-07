@@ -113,3 +113,9 @@ cargo fmt --all --check                  # clean
 - `.env.nori-eth-token-bridge` / `.env.nori-eth-timelock` are gitignored
   deploy outputs; the `.example` files are the committed templates.
 - Keep README.md, DEPLOYMENT.md, and this file in sync with code changes.
+- Changing and releasing the sdk (`@nori-zk/nori-bridge-solana-sdk`), in this order:
+    1. Collect everything the apps need from it first, so one release covers it.
+    2. Explain each change and why, and ask. Change nothing until the user says yes.
+    3. Make the changes, bump the version (`package.json`, `sdk/package.json`, `package-lock.json`), and run its build, lint and unit tests.
+    4. `git add` the changed paths and give the user the commit message. The user commits and pushes.
+    5. Run `npm run publish -- --dry-run` (`nw-publish`) and report it. The user publishes.

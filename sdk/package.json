@@ -1,6 +1,6 @@
 {
     "name": "@nori-zk/nori-bridge-solana-sdk",
-    "version": "0.0.4",
+    "version": "0.0.5",
     "description": "Nori bridge Solana SDK: track Ethereum proof requests through the bridge to Solana and build their witnesses",
     "author": "",
     "license": "Apache-2.0",

@@ -37,7 +37,12 @@ export {
     type EthereumWalletMachine,
     type EthereumWalletOptions,
 } from './rpc/eth/ystate/ethereumWallet.impl.js';
-export { type Eip1193EventProvider } from './rpc/eth/eip1193.js';
+export {
+    requestErrorCode,
+    USER_REJECTED_REQUEST,
+    type Eip1193EventProvider,
+} from './rpc/eth/eip1193.js';
+export { dataOnEntry$, stateOf$, type StartedMachine } from './ystate/dataOnEntry.js';
 export {
     getEthereumProviderWithConnectivity$,
     type EthereumProviderConnectivityOptions,
