@@ -1,6 +1,6 @@
 {
     "name": "@nori-zk/nori-bridge-solana-sdk",
-    "version": "0.0.2",
+    "version": "0.0.3",
     "description": "Nori bridge Solana SDK: track Ethereum proof requests through the bridge to Solana and build their witnesses",
     "author": "",
     "license": "Apache-2.0",
@@ -56,8 +56,8 @@
         "test:e2e": "for f in $(find src -name '*.e2e.spec.ts'); do node --experimental-vm-modules ../node_modules/jest/bin/jest.js --runInBand --forceExit \"$f\" || exit 1; done",
         "test-ci": "npm run test:unit",
         "testw": "node --experimental-vm-modules ../node_modules/jest/bin/jest.js --watch --runInBand",
-        "lint": "npx eslint src/*",
-        "lint:fix": "npx eslint src/* --fix",
+        "lint": "npx eslint src",
+        "lint:fix": "npx eslint src --fix",
         "generate:client": "node scripts/generate-client.mjs"
     },
     "devDependencies": {
