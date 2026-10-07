@@ -49,7 +49,7 @@ async function probe(urls: string[], timeoutMs: number): Promise<Probe> {
     const answered = await Promise.any(
         urls.map((url) =>
             fetch(url, {
-                method: 'HEAD',
+                method: 'GET',
                 mode: 'no-cors',
                 cache: 'no-store',
                 signal: AbortSignal.timeout(timeoutMs),

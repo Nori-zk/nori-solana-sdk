@@ -27,7 +27,7 @@ export const getBridgeStateTopic$ = (
         | ReconnectingWebSocketSubject<WebSocketServiceTopicSubscriptionMessage>
 ) =>
     (
-        bridgeSocket$.asObservable().pipe(
+        bridgeSocket$.pipe(
             // Filter by topic and suppress events when the state is 'unknown'
             filter(
                 (message) =>
@@ -70,7 +70,6 @@ export const getBridgeTimingsTopic$ = (
         | ReconnectingWebSocketSubject<WebSocketServiceTopicSubscriptionMessage>
 ) =>
     bridgeSocket$
-        .asObservable()
         .pipe(
             // Filter by topic and suppress events when the state is 'unknown'
             filter((message) => message.topic === 'timings.notices.transition')
@@ -95,7 +94,7 @@ export const getEthStateTopic$ = (
         | ReconnectingWebSocketSubject<WebSocketServiceTopicSubscriptionMessage>
 ) =>
     (
-        bridgeSocket$.asObservable().pipe(
+        bridgeSocket$.pipe(
             // Filter by topic and suppress events when the state is 'unknown'
             filter(
                 (message) =>
