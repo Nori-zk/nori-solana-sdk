@@ -1,4 +1,4 @@
-import { define } from '@yaw-rx/ystate';
+import { define, type StateUnion } from '@yaw-rx/ystate';
 import type { ConnectionName } from '../connectedRead.js';
 import { ProofRequestState } from '../types.js';
 
@@ -192,9 +192,4 @@ export const ProofRequestStateGraph = define({
     },
 });
 
-export type ProofRequestStateNodeUnion = {
-    [Node in keyof typeof ProofRequestStateGraph.nodes]: {
-        node: Node;
-        data: (typeof ProofRequestStateGraph.nodes)[Node];
-    };
-}[keyof typeof ProofRequestStateGraph.nodes];
+export type ProofRequestStateNodeUnion = StateUnion<typeof ProofRequestStateGraph.nodes>;

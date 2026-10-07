@@ -1,11 +1,11 @@
-import { define } from '@yaw-rx/ystate';
+import { define, type StateUnion } from '@yaw-rx/ystate';
 import type { ObservedValueOf } from 'rxjs';
 import type {
     getBridgeStateTopic$,
     getBridgeTimingsTopic$,
     getEthStateTopic$,
 } from '../../rx/topics.js';
-import { BridgeProofRequestProcessingStatus } from '../../rx/proofRequest.js';
+import type { BridgeProofRequestProcessingStatus } from '../../rx/proofRequest.js';
 
 type BridgeState = ObservedValueOf<ReturnType<typeof getBridgeStateTopic$>>;
 
@@ -77,12 +77,9 @@ export const UnprocessedProofRequestStateGraph = define({
     },
 });
 
-export type UnprocessedProofRequestStateNodeUnion = {
-    [Node in keyof typeof UnprocessedProofRequestStateGraph.nodes]: {
-        node: Node;
-        data: (typeof UnprocessedProofRequestStateGraph.nodes)[Node];
-    };
-}[keyof typeof UnprocessedProofRequestStateGraph.nodes];
+export type UnprocessedProofRequestStateNodeUnion = StateUnion<
+    typeof UnprocessedProofRequestStateGraph.nodes
+>;
 
 export type UnprocessedProofRequestTopics = {
     ethStateTopic$: ReturnType<typeof getEthStateTopic$>;

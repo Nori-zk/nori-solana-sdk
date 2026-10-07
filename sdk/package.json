@@ -1,6 +1,6 @@
 {
     "name": "@nori-zk/nori-bridge-solana-sdk",
-    "version": "0.0.1",
+    "version": "0.0.2",
     "description": "Nori bridge Solana SDK: track Ethereum proof requests through the bridge to Solana and build their witnesses",
     "author": "",
     "license": "Apache-2.0",
@@ -86,7 +86,7 @@
         "@nori-zk/ethereum-solana-bridge": "*",
         "@nori-zk/ethereum-solana-proof-queue-utils-glam": "0.0.1",
         "@nori-zk/pts-types": "7.0.2",
-        "@yaw-rx/ystate": "^0.0.2",
+        "@yaw-rx/ystate": "^0.1.0",
         "esm-iso-logger": "1.0.2",
         "ethers": "^6.16.0",
         "rxjs": "^7.8.2",

@@ -1,4 +1,3 @@
-import { type RunningMachine } from '@yaw-rx/ystate';
 import {
     catchError,
     defer,
@@ -22,7 +21,7 @@ import {
 } from 'rxjs';
 import { toQuantity } from 'ethers';
 import { messageOf } from '../../../messageOf.js';
-import { dataOnEntry$, stateOf$ } from '../../../ystate/dataOnEntry.js';
+import { dataOnEntry$, stateOf$, type StartedMachine } from '../../../ystate/dataOnEntry.js';
 import {
     type HealthCheckTimings,
     resolveHealthCheckTimings,
@@ -171,7 +170,7 @@ export function createEthereumWalletMachine(options: EthereumWalletOptions) {
     const chooseWallet$ = new Subject<string>();
     const switchToExpectedChain$ = new Subject<void>();
     const close$ = new Subject<void>();
-    const started$ = new ReplaySubject<RunningMachine>(1);
+    const started$ = new ReplaySubject<StartedMachine<EthereumWalletState>>(1);
     const state$ = stateOf$(started$);
 
     // Every wallet that has announced itself, by uuid, and each one as it does.
@@ -192,13 +191,8 @@ export function createEthereumWalletMachine(options: EthereumWalletOptions) {
 
     // The chosen wallet's provider, from the wallet the machine carries.
     const walletProvider$ = state$.pipe(
-        filter(
-            (state): state is { node: string; data: { wallet: WalletInfo } } =>
-                typeof state.data === 'object' &&
-                state.data !== null &&
-                'wallet' in state.data
-        ),
-        map(({ data }) => data.wallet.uuid),
+        map(({ data }) => ('wallet' in data ? data.wallet.uuid : undefined)),
+        filter((uuid): uuid is string => uuid !== undefined),
         distinctUntilChanged(),
         map((uuid) => wallets.get(uuid)?.provider),
         filter(

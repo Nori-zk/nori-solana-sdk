@@ -4,9 +4,9 @@ import {
     isSolanaError,
     type RpcTransport,
 } from '@solana/kit';
-import { type RunningMachine } from '@yaw-rx/ystate';
 import { filter, ReplaySubject, Subject, Subscription } from 'rxjs';
-import { stateOf$ } from '../../ystate/dataOnEntry.js';
+import { stateOf$, type StartedMachine } from '../../ystate/dataOnEntry.js';
+import { type SolanaRpcConnection } from './ystate/solanaRpcConnectivity.js';
 import { type HealthCheckTimings } from '../healthCheckTimings.js';
 import { type NetworkMachine } from '../ystate/network.impl.js';
 import { SolanaRpcTransportError } from './errors.js';
@@ -125,7 +125,7 @@ export function getSolanaRpcWithConnectivity$(
     );
     const readFailed$ = new Subject<void>();
     const close$ = new Subject<void>();
-    const started$ = new ReplaySubject<RunningMachine>(1);
+    const started$ = new ReplaySubject<StartedMachine<SolanaRpcConnection>>(1);
     const subscriptions = new Subscription();
 
     const machine = createSolanaRpcConnectivityMachine({

@@ -61,7 +61,7 @@ export interface EthereumProviderConnectivityEnvironment extends HealthCheckTimi
     /** The owner is closing the connection. */
     close$: Observable<unknown>;
     /** The running machine's states, from `stateOf$`. */
-    connection$: Observable<{ node: string; data: unknown }>;
+    connection$: Observable<EthereumProviderConnection>;
 }
 
 /**

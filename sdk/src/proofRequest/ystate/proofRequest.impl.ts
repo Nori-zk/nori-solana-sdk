@@ -1,4 +1,3 @@
-import { type RunningMachine } from '@yaw-rx/ystate';
 import {
     EMPTY,
     exhaustMap,
@@ -28,7 +27,7 @@ import {
 import { ProofRequestTransactionNotMinedError } from '../rpc/eth/errors.js';
 import { resolveHealthCheckTimings, retryDelayMs } from '../rpc/healthCheckTimings.js';
 import { ProofRequestState } from '../types.js';
-import { dataOnEntry$, stateOf$ } from './dataOnEntry.js';
+import { dataOnEntry$, stateOf$, type StartedMachine } from './dataOnEntry.js';
 import { ProofRequestStateGraph, type ProofRequestStateNodeUnion } from './proofRequest.js';
 import { type ReadRetryBackoff } from './proofRequestHistory.impl.js';
 
@@ -127,7 +126,7 @@ export function createProofRequestStateMachine(
     const timings = resolveHealthCheckTimings(backoff);
     const retry$ = new Subject<void>();
     const close$ = new Subject<void>();
-    const started$ = new ReplaySubject<RunningMachine>(1);
+    const started$ = new ReplaySubject<StartedMachine<ProofRequestStateNodeUnion>>(1);
     const state$ = stateOf$(started$);
     const checkDue$ = merge(timer(0, pollIntervalMs), recheckTrigger$);
 

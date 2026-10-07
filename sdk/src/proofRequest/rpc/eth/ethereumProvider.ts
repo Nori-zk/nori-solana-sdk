@@ -1,4 +1,3 @@
-import { type RunningMachine } from '@yaw-rx/ystate';
 import {
     filter,
     NEVER,
@@ -14,7 +13,8 @@ import {
     getRpcUrl,
     parseRpcUrl,
 } from '@nori-zk/ethereum-solana-bridge/iso-provider';
-import { stateOf$ } from '../../ystate/dataOnEntry.js';
+import { stateOf$, type StartedMachine } from '../../ystate/dataOnEntry.js';
+import { type EthereumProviderConnection } from './ystate/ethereumProviderConnectivity.js';
 import { type NetworkMachine } from '../ystate/network.impl.js';
 import { type Eip1193EventProvider, eip1193Event$ } from './eip1193.js';
 import { createEthereumProviderConnectivityMachine } from './ystate/ethereumProviderConnectivity.impl.js';
@@ -74,7 +74,7 @@ export function getEthereumProviderWithConnectivity$(
     const rpcUrl = options.rpcUrl ?? getRpcUrl();
     const readFailed$ = new Subject<void>();
     const close$ = new Subject<void>();
-    const started$ = new ReplaySubject<RunningMachine>(1);
+    const started$ = new ReplaySubject<StartedMachine<EthereumProviderConnection>>(1);
     const subscriptions = new Subscription();
 
     const networkWentOffline$ = network.state$.pipe(filter(atNode('offline')));

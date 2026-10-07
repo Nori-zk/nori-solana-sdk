@@ -1,4 +1,3 @@
-import { type RunningMachine } from '@yaw-rx/ystate';
 import {
     EMPTY,
     filter,
@@ -32,7 +31,7 @@ import {
     retryDelayMs,
 } from '../rpc/healthCheckTimings.js';
 import { withBackoff } from '../rpc/withBackoff.js';
-import { dataOnEntry$, stateOf$ } from './dataOnEntry.js';
+import { dataOnEntry$, stateOf$, type StartedMachine } from './dataOnEntry.js';
 import {
     LatestProofRequestsGraph,
     type LatestProofRequestsState,
@@ -105,7 +104,7 @@ export function createLatestProofRequestsMachine(
     const timings = resolveHealthCheckTimings(backoff);
     const retry$ = new Subject<void>();
     const close$ = new Subject<void>();
-    const started$ = new ReplaySubject<RunningMachine>(1);
+    const started$ = new ReplaySubject<StartedMachine<LatestProofRequestsState>>(1);
     const state$ = stateOf$(started$);
 
     /**

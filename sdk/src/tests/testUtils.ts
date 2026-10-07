@@ -22,7 +22,9 @@ import { SolanaRpcTransportError } from '../proofRequest/rpc/solana/errors.js';
 import type { SolanaRpc } from '../proofRequest/rpc/solana/solanaRpc.js';
 import { createEthereumProviderConnectivityMachine } from '../proofRequest/rpc/eth/ystate/ethereumProviderConnectivity.impl.js';
 import { createSolanaRpcConnectivityMachine } from '../proofRequest/rpc/solana/ystate/solanaRpcConnectivity.impl.js';
-import { stateOf$ } from '../proofRequest/ystate/dataOnEntry.js';
+import { stateOf$, type StartedMachine } from '../proofRequest/ystate/dataOnEntry.js';
+import { type EthereumProviderConnection } from '../proofRequest/rpc/eth/ystate/ethereumProviderConnectivity.js';
+import { type SolanaRpcConnection } from '../proofRequest/rpc/solana/ystate/solanaRpcConnectivity.js';
 
 export const QUEUE_ADDRESS = getAddress('0x' + '11'.repeat(20));
 export const TARGET_A = getAddress('0x' + 'aa'.repeat(20));
@@ -365,7 +367,7 @@ export function createTestConnections(
 
     const ethereumReadFailed$ = new Subject<void>();
     const ethereumClose$ = new Subject<void>();
-    const ethereumStarted$ = new ReplaySubject<RunningMachine>(1);
+    const ethereumStarted$ = new ReplaySubject<StartedMachine<EthereumProviderConnection>>(1);
     const ethereumProviderConnectivity =
         createEthereumProviderConnectivityMachine({
             ...FAST_TIMINGS,
@@ -400,7 +402,7 @@ export function createTestConnections(
 
     const solanaReadFailed$ = new Subject<void>();
     const solanaClose$ = new Subject<void>();
-    const solanaStarted$ = new ReplaySubject<RunningMachine>(1);
+    const solanaStarted$ = new ReplaySubject<StartedMachine<SolanaRpcConnection>>(1);
     const solanaRpcConnectivity = createSolanaRpcConnectivityMachine({
         ...FAST_TIMINGS,
         expectedGenesisHash: EXPECTED_GENESIS_HASH,

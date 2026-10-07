@@ -1,8 +1,12 @@
-import { type RunningMachine } from '@yaw-rx/ystate';
 import { filter, map, type Observable, switchMap, take } from 'rxjs';
 
 /** A graph state: one of its nodes and that node's data. */
 type GraphState = { node: string; data: unknown };
+
+/** A started machine, as far as its states go: `.start()`'s running machine. */
+export interface StartedMachine<TState extends GraphState> {
+    state$: Observable<TState>;
+}
 
 /**
  * The running machine's states, once it has started.
@@ -15,9 +19,9 @@ type GraphState = { node: string; data: unknown };
  * @param started$ Emits the running machine once `.start()` returns it.
  * @returns The running machine's `state$`.
  */
-export function stateOf$(
-    started$: Observable<RunningMachine>
-): Observable<{ node: string; data: unknown }> {
+export function stateOf$<TState extends GraphState>(
+    started$: Observable<StartedMachine<TState>>
+): Observable<TState> {
     return started$.pipe(
         take(1),
         switchMap((machine) => machine.state$)
@@ -47,16 +51,15 @@ export function dataOnEntry$<
     TState extends GraphState,
     TNode extends TState['node'],
 >(
-    state$: Observable<{ node: string; data: unknown }>,
+    state$: Observable<TState>,
     node: TNode
 ): Observable<Extract<TState, { node: TNode }>['data']> {
     return state$.pipe(
-        filter((state) => state.node === node),
+        filter(
+            (state): state is Extract<TState, { node: TNode }> =>
+                state.node === node
+        ),
         take(1),
-        // ystate types a running machine's `state$` as any node with any
-        // data (`RunningMachine` is not generic over its graph), but it only
-        // ever emits the graph's own states, so a state at `node` carries
-        // that node's data.
-        map((state) => (state as Extract<TState, { node: TNode }>).data)
+        map((state) => state.data)
     );
 }

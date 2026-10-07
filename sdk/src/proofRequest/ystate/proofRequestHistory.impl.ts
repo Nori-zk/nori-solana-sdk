@@ -1,4 +1,3 @@
-import { type RunningMachine } from '@yaw-rx/ystate';
 import {
     filter,
     type Observable,
@@ -26,7 +25,7 @@ import {
     resolveHealthCheckTimings,
     retryDelayMs,
 } from '../rpc/healthCheckTimings.js';
-import { dataOnEntry$, stateOf$ } from './dataOnEntry.js';
+import { dataOnEntry$, stateOf$, type StartedMachine } from './dataOnEntry.js';
 import {
     ProofRequestHistoryGraph,
     type ProofRequestHistoryState,
@@ -88,7 +87,7 @@ export function createProofRequestHistoryMachine(
     const loadMore$ = new Subject<void>();
     const retry$ = new Subject<void>();
     const close$ = new Subject<void>();
-    const started$ = new ReplaySubject<RunningMachine>(1);
+    const started$ = new ReplaySubject<StartedMachine<ProofRequestHistoryState>>(1);
     const state$ = stateOf$(started$);
 
     // The outcome edges of `loadingPage` share one read per entry into it,

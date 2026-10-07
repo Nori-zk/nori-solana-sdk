@@ -55,7 +55,7 @@ export interface SolanaRpcConnectivityEnvironment extends HealthCheckTimings {
     /** The owner is closing the connection. */
     close$: Observable<unknown>;
     /** The running machine's states, from `stateOf$`. */
-    connection$: Observable<{ node: string; data: unknown }>;
+    connection$: Observable<SolanaRpcConnection>;
 }
 
 /**

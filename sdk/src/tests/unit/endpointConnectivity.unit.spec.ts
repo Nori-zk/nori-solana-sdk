@@ -1,11 +1,12 @@
-import { type RunningMachine } from '@yaw-rx/ystate';
 import { BehaviorSubject, filter, ReplaySubject, Subject } from 'rxjs';
 import {
     createEthereumProviderConnectivityMachine,
     type EthereumHealthCheck,
 } from '../../proofRequest/rpc/eth/ystate/ethereumProviderConnectivity.impl.js';
 import { createSolanaRpcConnectivityMachine } from '../../proofRequest/rpc/solana/ystate/solanaRpcConnectivity.impl.js';
-import { stateOf$ } from '../../proofRequest/ystate/dataOnEntry.js';
+import { stateOf$, type StartedMachine } from '../../proofRequest/ystate/dataOnEntry.js';
+import { type EthereumProviderConnection } from '../../proofRequest/rpc/eth/ystate/ethereumProviderConnectivity.js';
+import { type SolanaRpcConnection } from '../../proofRequest/rpc/solana/ystate/solanaRpcConnectivity.js';
 import {
     EXPECTED_CHAIN_ID,
     EXPECTED_GENESIS_HASH,
@@ -32,7 +33,7 @@ function startEthereumEndpoint(
     const walletDisconnected$ = new Subject<void>();
     const readFailed$ = new Subject<void>();
     const close$ = new Subject<void>();
-    const started$ = new ReplaySubject<RunningMachine>(1);
+    const started$ = new ReplaySubject<StartedMachine<EthereumProviderConnection>>(1);
     const machine = createEthereumProviderConnectivityMachine({
         ...FAST_TIMINGS,
         expectedChainId: EXPECTED_CHAIN_ID,
@@ -205,7 +206,7 @@ function startSolanaEndpoints(
     const network$ = new BehaviorSubject<'online' | 'offline'>('online');
     const readFailed$ = new Subject<void>();
     const close$ = new Subject<void>();
-    const started$ = new ReplaySubject<RunningMachine>(1);
+    const started$ = new ReplaySubject<StartedMachine<SolanaRpcConnection>>(1);
     const machine = createSolanaRpcConnectivityMachine({
         ...FAST_TIMINGS,
         expectedGenesisHash: EXPECTED_GENESIS_HASH,
