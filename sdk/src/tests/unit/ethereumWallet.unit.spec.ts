@@ -1,10 +1,12 @@
 import { toQuantity } from 'ethers';
+import { BehaviorSubject } from 'rxjs';
 import {
     type Eip1193EventProvider,
     USER_REJECTED_REQUEST,
-} from '../../proofRequest/rpc/eth/eip1193.js';
-import { createEthereumWalletMachine } from '../../proofRequest/rpc/eth/ystate/ethereumWallet.impl.js';
-import type { WalletInfo } from '../../proofRequest/rpc/eth/ystate/ethereumWallet.js';
+} from '../../rpc/eth/eip1193.js';
+import { ethereumWallet } from '../../rpc/eth/ethereumWallet.impl.js';
+import type { WalletInfo } from '../../rpc/eth/ethereumWallet.js';
+import { type NetworkMachine } from '../../rpc/connection/network.impl.js';
 import {
     EXPECTED_CHAIN_ID,
     FAST_TIMINGS,
@@ -16,12 +18,14 @@ import {
 const OTHER_CHAIN_ID = 1n;
 
 /**
- * A wallet as an extension provides it: answers `eth_chainId`, takes switch
- * requests, and emits `chainChanged`. `onSwitchRequest` decides what the
- * user does with a switch request.
+ * A wallet as an extension provides it: answers `eth_chainId` and
+ * `eth_blockNumber`, takes switch requests, and emits `chainChanged`,
+ * `connect` and `disconnect`. `onSwitchRequest` decides what the user does
+ * with a switch request.
  */
 class FakeWallet implements Eip1193EventProvider {
     chainId = OTHER_CHAIN_ID;
+    blockNumber = 1;
     answers = true;
     switchRequests = 0;
     onSwitchRequest: 'accept' | 'decline' | 'fail' = 'accept';
@@ -35,9 +39,11 @@ class FakeWallet implements Eip1193EventProvider {
         method: string;
         params?: unknown[] | Record<string, unknown>;
     }) {
-        if (method === 'eth_chainId') {
+        if (method === 'eth_chainId' || method === 'eth_blockNumber') {
             if (!this.answers) return new Promise(() => undefined);
-            return toQuantity(this.chainId);
+            return toQuantity(
+                method === 'eth_chainId' ? this.chainId : this.blockNumber
+            );
         }
         if (method === 'wallet_switchEthereumChain') {
             this.switchRequests++;
@@ -68,13 +74,17 @@ class FakeWallet implements Eip1193EventProvider {
 
     // Emits to a copy of the listeners, as an EventEmitter does: a listener
     // added while the event is being delivered does not receive it.
-    changeChain(chainId: bigint) {
-        this.chainId = chainId;
+    emit(event: string, ...args: unknown[]) {
         setTimeout(() =>
-            [...(this.listeners.get('chainChanged') ?? [])].forEach(
-                (listener) => listener(toQuantity(chainId))
+            [...(this.listeners.get(event) ?? [])].forEach((listener) =>
+                listener(...args)
             )
         );
+    }
+
+    changeChain(chainId: bigint) {
+        this.chainId = chainId;
+        this.emit('chainChanged', toQuantity(chainId));
     }
 
     announceOn(walletEvents: EventTarget) {
@@ -93,109 +103,118 @@ const walletInfo = (name: string): WalletInfo => ({
     rdns: `io.${name.toLowerCase()}`,
 });
 
-/** Starts the wallet machine over its own announcement target. */
-function startWalletMachine() {
+/** Starts the wallet machine over its own announcement target and network. */
+function startWallet() {
     const walletEvents = new EventTarget();
-    const wallet = createEthereumWalletMachine({
-        ...FAST_TIMINGS,
-        expectedChainId: EXPECTED_CHAIN_ID,
-        walletSearchMs: 30,
-        walletEvents,
-        injectedProvider: undefined,
+    const network$ = new BehaviorSubject<{ node: 'online' | 'offline' }>({
+        node: 'online',
     });
-    return { ...wallet, walletEvents };
+    const wallet = ethereumWallet(
+        {
+            ...FAST_TIMINGS,
+            expectedChainId: EXPECTED_CHAIN_ID,
+            walletSearchMs: 30,
+            walletEvents,
+            injectedProvider: undefined,
+        },
+        { state$: network$ } as unknown as NetworkMachine['network']
+    );
+    return { ...wallet, walletEvents, network$ };
 }
 
 describe('Ethereum wallet machine', () => {
     test('with no wallet it says so, and moves on when one is installed later', async () => {
-        const { ethereumWallet, walletEvents, close } = startWalletMachine();
-        await reach(ethereumWallet, 'noWalletFound');
+        const { connection, walletEvents, close } = startWallet();
+        await reach(connection, 'noWalletFound');
 
         const metamask = new FakeWallet(walletInfo('MetaMask'));
         metamask.chainId = EXPECTED_CHAIN_ID;
         metamask.announceOn(walletEvents);
-        const onChain = await reach(ethereumWallet, 'onExpectedChain');
-        expect(onChain.data).toEqual({
-            wallet: metamask.info,
-            chainId: EXPECTED_CHAIN_ID,
-        });
+        const ready = await reach(connection, 'ready');
+        expect(ready.data).toEqual(
+            expect.objectContaining({
+                wallet: metamask.info,
+                url: metamask.info.rdns,
+                health: { blockNumber: 1 },
+            })
+        );
         close();
     });
 
     test('with several wallets it waits for the app to choose one', async () => {
-        const { ethereumWallet, walletEvents, chooseWallet, close } =
-            startWalletMachine();
+        const { connection, walletEvents, chooseWallet, close } = startWallet();
         const metamask = new FakeWallet(walletInfo('MetaMask'));
         const rabby = new FakeWallet(walletInfo('Rabby'));
         rabby.chainId = EXPECTED_CHAIN_ID;
         metamask.announceOn(walletEvents);
         rabby.announceOn(walletEvents);
 
-        const choosing = await reach(ethereumWallet, 'choosingWallet');
+        const choosing = await reach(connection, 'choosingWallet');
         expect(choosing.data).toEqual({ wallets: [metamask.info, rabby.info] });
 
         chooseWallet('not-a-wallet');
         await sleep(20);
         chooseWallet(rabby.info.uuid);
-        const onChain = await reach(ethereumWallet, 'onExpectedChain');
-        expect(onChain.data).toEqual({
-            wallet: rabby.info,
-            chainId: EXPECTED_CHAIN_ID,
-        });
+        const ready = await reach(connection, 'ready');
+        expect(ready.data).toEqual(
+            expect.objectContaining({ wallet: rabby.info })
+        );
         close();
     });
 
     test('on another chain the app can ask to switch, and an accepted switch is followed', async () => {
-        const { ethereumWallet, walletEvents, switchToExpectedChain, close } =
-            startWalletMachine();
+        const { connection, walletEvents, switchToExpectedChain, close } =
+            startWallet();
         const metamask = new FakeWallet(walletInfo('MetaMask'));
         metamask.announceOn(walletEvents);
 
-        const other = await reach(ethereumWallet, 'onOtherChain');
-        expect(other.data).toEqual({
+        const wrong = await reach(connection, 'wrongNetwork');
+        expect(wrong.data).toEqual({
             wallet: metamask.info,
-            chainId: OTHER_CHAIN_ID,
-            expectedChainId: EXPECTED_CHAIN_ID,
+            url: metamask.info.rdns,
+            found: OTHER_CHAIN_ID.toString(),
+            expected: EXPECTED_CHAIN_ID.toString(),
+            failedChecks: 0,
             lastSwitchError: '',
         });
         switchToExpectedChain();
-        await reach(ethereumWallet, 'onExpectedChain');
+        await reach(connection, 'ready');
         expect(metamask.switchRequests).toBe(1);
         close();
     });
 
     test('a declined switch is not asked again until the user changes chain', async () => {
-        const { ethereumWallet, walletEvents, switchToExpectedChain, close } =
-            startWalletMachine();
+        const { connection, walletEvents, switchToExpectedChain, close } =
+            startWallet();
         const metamask = new FakeWallet(walletInfo('MetaMask'));
         metamask.onSwitchRequest = 'decline';
         metamask.announceOn(walletEvents);
-        await reach(ethereumWallet, 'onOtherChain');
+        await reach(connection, 'wrongNetwork');
 
         switchToExpectedChain();
-        await reach(ethereumWallet, 'switchDeclined');
+        await reach(connection, 'switchDeclined');
         switchToExpectedChain();
         switchToExpectedChain();
         await sleep(50);
         expect(metamask.switchRequests).toBe(1);
 
         metamask.changeChain(EXPECTED_CHAIN_ID);
-        await reach(ethereumWallet, 'onExpectedChain');
+        await reach(connection, 'ready');
         close();
     });
 
     test('a switch the wallet fails returns to the other chain with its error, and may be asked again', async () => {
-        const { ethereumWallet, walletEvents, switchToExpectedChain, close } =
-            startWalletMachine();
+        const { connection, walletEvents, switchToExpectedChain, close } =
+            startWallet();
         const metamask = new FakeWallet(walletInfo('MetaMask'));
         metamask.onSwitchRequest = 'fail';
         metamask.announceOn(walletEvents);
-        await reach(ethereumWallet, 'onOtherChain');
+        await reach(connection, 'wrongNetwork');
 
-        const visited = recordNodes(ethereumWallet);
+        const visited = recordNodes(connection);
         switchToExpectedChain();
         await sleep(50);
-        const latest = await reach(ethereumWallet, 'onOtherChain');
+        const latest = await reach(connection, 'wrongNetwork');
         expect(latest.data).toEqual(
             expect.objectContaining({
                 lastSwitchError: 'Unrecognized chain ID.',
@@ -205,41 +224,90 @@ describe('Ethereum wallet machine', () => {
 
         metamask.onSwitchRequest = 'accept';
         switchToExpectedChain();
-        await reach(ethereumWallet, 'onExpectedChain');
+        await reach(connection, 'ready');
         expect(metamask.switchRequests).toBe(2);
         close();
     });
 
     test('a wallet that does not answer is asked again with backoff', async () => {
-        const { ethereumWallet, walletEvents, close } = startWalletMachine();
+        const { connection, walletEvents, close } = startWallet();
         const metamask = new FakeWallet(walletInfo('MetaMask'));
         metamask.chainId = EXPECTED_CHAIN_ID;
         metamask.answers = false;
         metamask.announceOn(walletEvents);
 
-        const notResponding = await reach(
-            ethereumWallet,
-            'walletNotResponding'
-        );
-        expect(notResponding.data).toEqual(
+        const unreachable = await reach(connection, 'unreachable');
+        expect(unreachable.data).toEqual(
             expect.objectContaining({ failedChecks: 1 })
         );
-        await reach(ethereumWallet, 'walletNotResponding');
+        await reach(connection, 'unreachable');
         metamask.answers = true;
-        await reach(ethereumWallet, 'onExpectedChain');
+        await reach(connection, 'ready');
         close();
     });
 
-    test('a chain change while on the expected chain is followed to the other chain', async () => {
-        const { ethereumWallet, walletEvents, close } = startWalletMachine();
+    test('a chain change while ready is followed to the other chain', async () => {
+        const { connection, walletEvents, close } = startWallet();
         const metamask = new FakeWallet(walletInfo('MetaMask'));
         metamask.chainId = EXPECTED_CHAIN_ID;
         metamask.announceOn(walletEvents);
-        await reach(ethereumWallet, 'onExpectedChain');
+        await reach(connection, 'ready');
 
         metamask.changeChain(OTHER_CHAIN_ID);
-        await reach(ethereumWallet, 'onOtherChain');
+        await reach(connection, 'wrongNetwork');
         close();
-        await reach(ethereumWallet, 'closed');
+        await reach(connection, 'closed');
+    });
+
+    test('while ready it checks in the background, carrying the latest block', async () => {
+        const { connection, walletEvents, close } = startWallet();
+        const metamask = new FakeWallet(walletInfo('MetaMask'));
+        metamask.chainId = EXPECTED_CHAIN_ID;
+        metamask.announceOn(walletEvents);
+        await reach(connection, 'ready');
+
+        metamask.blockNumber = 2;
+        await sleep(150);
+        const ready = await reach(connection, 'ready');
+        expect(ready.data).toEqual(
+            expect.objectContaining({ health: { blockNumber: 2 } })
+        );
+        close();
+    });
+
+    test('a failed read checks at once, and a disconnect and reconnect recover', async () => {
+        const { connection, walletEvents, reportReadFailed, close } =
+            startWallet();
+        const metamask = new FakeWallet(walletInfo('MetaMask'));
+        metamask.chainId = EXPECTED_CHAIN_ID;
+        metamask.announceOn(walletEvents);
+        await reach(connection, 'ready');
+
+        metamask.answers = false;
+        reportReadFailed();
+        await reach(connection, 'unreachable');
+
+        metamask.answers = true;
+        metamask.emit('connect', { chainId: toQuantity(EXPECTED_CHAIN_ID) });
+        await reach(connection, 'ready');
+
+        metamask.emit('disconnect');
+        await reach(connection, 'unreachable');
+        close();
+    });
+
+    test('going offline pauses it, and coming back online checks again', async () => {
+        const { connection, walletEvents, network$, close } = startWallet();
+        const metamask = new FakeWallet(walletInfo('MetaMask'));
+        metamask.chainId = EXPECTED_CHAIN_ID;
+        metamask.announceOn(walletEvents);
+        await reach(connection, 'ready');
+
+        network$.next({ node: 'offline' });
+        const offline = await reach(connection, 'offline');
+        expect(offline.data).toEqual({ wallet: metamask.info });
+        network$.next({ node: 'online' });
+        await reach(connection, 'ready');
+        close();
     });
 });

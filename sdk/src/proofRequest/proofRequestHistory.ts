@@ -1,155 +1,139 @@
-import { TOKEN_PROGRAM_ADDRESS } from '../program/programs/token.js';
-import { classifyProofRequests } from './classifyProofRequests.js';
-import {
-    type ProofRequestStateSnapshot,
-    type ProofRequestStateSnapshotRequest,
-} from './getProofRequestStateSnapshot.js';
-import { EthRpcTransportError } from './rpc/eth/errors.js';
-import { type ProofRequest } from './rpc/eth/fetchProofRequest.js';
-import {
-    fetchProofRequestsByTarget,
-    type ProofRequestHistoryCursor,
-    type ProofRequestsByTargetQuery,
-} from './rpc/eth/fetchProofRequestsByTarget.js';
-import { fetchBridgeState } from './rpc/solana/fetchBridgeState.js';
-import { withBackoff } from './rpc/withBackoff.js';
-
-/** The clients and addresses a history read needs: no single enqueuing transaction. */
-export type ProofRequestHistoryRequest = Omit<
-    ProofRequestStateSnapshotRequest,
-    'proofRequestTxHash'
->;
-
-/** The queue and program addresses a history read needs besides its clients. */
-export type ProofRequestHistoryAddresses = Pick<
-    ProofRequestHistoryRequest,
-    'proofQueueAddress' | 'programAddress'
->;
-
-/** A request a submitting address enqueued, with where it is now. */
-export interface ProofRequestHistoryEntry extends ProofRequest {
-    /** `unprocessed`, or `proofAvailable` with the committed batch covering it (what `fetchProofRequestWitness` takes). */
-    snapshot: ProofRequestStateSnapshot;
-}
-
-export interface ProofRequestHistoryPage {
-    entries: ProofRequestHistoryEntry[];
-    /** Pass as `after` for the next page. */
-    cursor?: ProofRequestHistoryCursor;
-    /** Whether the scan reached the end of the block range. */
-    done: boolean;
-}
-
-export interface ProofRequestCounts {
-    total: number;
-    proofAvailable: number;
-    unprocessed: number;
-}
-
-/** Requests read per log page while counting; counting keeps no entries, only ids. */
-const COUNTING_PAGE_SIZE = 1000;
+import { define, type StateUnion } from '@yaw-rx/ystate';
+import type { ConnectionName } from './connectedRead.js';
+import type { ProofRequestHistoryEntry } from './fetchProofRequestHistory.js';
+import type { ProofRequestHistoryCursor } from '../rpc/eth/fetchProofRequestsByTarget.js';
 
 /**
- * Reads one page of a submitting address's proof requests from Ethereum and
- * classifies them against one read of the bridge state on Solana.
+ * Pages through a submitting address's proof requests, reading through the
+ * Ethereum provider and Solana RPC connectivity machines. Nothing is a dead
+ * end: lost connections are waited for and failures retry themselves.
  *
- * @param request The Ethereum provider, Solana RPC, queue and program addresses.
- * @param query The submitting address, block range, order, page size and cursor.
- * @returns The page's entries, its continuation cursor, and whether the range is exhausted.
- * @throws EthRpcTransportError When an Ethereum read still fails after its retries.
- * @throws SolanaRpcTransportError When a Solana read still fails after its retries.
+ * - `loadingPage` reads one page from `cursor`. The read's outcomes race on
+ *   one shared read: `pageArrived`, `lastPageArrived` (the block range is
+ *   exhausted), `connectionLost`, `readFailedOnHealthyConnection` or
+ *   `pageFailed`.
+ * - A read that fails to reach a connection reports it to that connection,
+ *   which re-checks itself, and the machine stays in `loadingPage` until the
+ *   check settles: a connection that turns out to be down is
+ *   `connectionLost`; one that passes straight back to `ready` means the read
+ *   itself failed: `readFailedOnHealthyConnection`.
+ * - A connection that is not `ready` when a page starts, or leaves `ready`
+ *   during it, is `connectionLost` too.
+ * - `waitingForConnection` names the connections it waits on in `waitingOn`,
+ *   updated as they change (the `connectionsChanged` self-loop), so the app
+ *   can show the right message alongside those connections' own states. It
+ *   resumes from the saved cursor once both are `ready`.
+ * - `failed` reads again by itself after a wait that doubles with each
+ *   consecutive failure (`failedReads`), or at once on `retry`. A page that
+ *   arrives resets `failedReads`.
+ * - Loss of a connection is only noticed while loading: `waitingForMore`
+ *   does no reads, and a `loadMore` while a connection is down moves to
+ *   `loadingPage`, which reports the loss straight away.
+ * - `allLoaded` and `closed` are terminal.
  */
-export async function fetchProofRequestHistoryPage(
-    request: ProofRequestHistoryRequest,
-    query: ProofRequestsByTargetQuery
-): Promise<ProofRequestHistoryPage> {
-    const page = await fetchProofRequestsByTarget(
-        request.proofQueueAddress,
-        query,
-        request.provider
-    );
-    if (page.requests.length === 0) {
-        return { entries: [], cursor: page.cursor, done: page.done };
-    }
-    const snapshots = await classifyProofRequests(
-        request.rpc,
-        page.requests.map((proofRequest) => ({
-            requestId: proofRequest.requestId,
-            requestBlockNumber: BigInt(proofRequest.blockNumber),
-        })),
-        request.programAddress
-    );
-    return {
-        entries: page.requests.map((proofRequest, i) => ({
-            ...proofRequest,
-            snapshot: snapshots[i],
-        })),
-        cursor: page.cursor,
-        done: page.done,
-    };
-}
+export const ProofRequestHistoryGraph = define({
+    nodes: {
+        loadingPage: {
+            loaded: [] as ProofRequestHistoryEntry[],
+            cursor: undefined as ProofRequestHistoryCursor | undefined,
+            failedReads: 0,
+        },
+        waitingForMore: {
+            loaded: [] as ProofRequestHistoryEntry[],
+            cursor: undefined as ProofRequestHistoryCursor | undefined,
+        },
+        waitingForConnection: {
+            loaded: [] as ProofRequestHistoryEntry[],
+            cursor: undefined as ProofRequestHistoryCursor | undefined,
+            failedReads: 0,
+            waitingOn: [] as ConnectionName[],
+        },
+        failed: {
+            loaded: [] as ProofRequestHistoryEntry[],
+            cursor: undefined as ProofRequestHistoryCursor | undefined,
+            failedReads: 0,
+            error: '',
+        },
+        allLoaded: { loaded: [] as ProofRequestHistoryEntry[] },
+        closed: {},
+    },
+    edges: {
+        pageLoaded: {
+            from: 'loadingPage',
+            to: 'waitingForMore',
+            on: 'pageArrived.next',
+        },
+        lastPageLoaded: {
+            from: 'loadingPage',
+            to: 'allLoaded',
+            on: 'lastPageArrived.next',
+        },
+        connectionLost: {
+            from: 'loadingPage',
+            to: 'waitingForConnection',
+            on: 'connectionLost.next',
+        },
+        readFailedOnHealthyConnection: {
+            from: 'loadingPage',
+            to: 'failed',
+            on: 'readFailedOnHealthyConnection.next',
+        },
+        pageFailed: {
+            from: 'loadingPage',
+            to: 'failed',
+            on: 'pageFailed.next',
+        },
 
-/**
- * Counts a submitting address's proof requests over a block range, and how
- * many have a proof available: the queue drains in order, so every id below
- * the bridge's queue cursor is proven.
- *
- * @param request The Ethereum provider, Solana RPC, queue and program addresses.
- * @param query The submitting address and block range.
- * @returns The total, proven and unprocessed counts.
- * @throws EthRpcTransportError When an Ethereum read still fails after its retries.
- * @throws SolanaRpcTransportError When a Solana read still fails after its retries.
- */
-export async function fetchProofRequestCountsByTarget(
-    request: ProofRequestHistoryRequest,
-    query: Pick<
-        ProofRequestsByTargetQuery,
-        'target' | 'fromBlock' | 'toBlock' | 'maxBlockRangePerQuery'
-    >
-): Promise<ProofRequestCounts> {
-    // Fixed up front so every page reads the same range.
-    const toBlock =
-        query.toBlock ??
-        (await withBackoff(() => request.provider.getBlockNumber()).catch(
-            (error: unknown) => {
-                throw new EthRpcTransportError(
-                    'Failed to read the latest block number.',
-                    error
-                );
-            }
-        ));
+        moreRequested: {
+            from: 'waitingForMore',
+            to: 'loadingPage',
+            on: 'loadMore.next',
+        },
+        connectionsChanged: {
+            from: 'waitingForConnection',
+            to: 'waitingForConnection',
+            on: 'connectionsChanged.next',
+        },
+        connectionRestored: {
+            from: 'waitingForConnection',
+            to: 'loadingPage',
+            on: 'connectionRestored.next',
+        },
+        retryStarted: {
+            from: 'failed',
+            to: 'loadingPage',
+            on: 'retryDue.next',
+        },
+        retryRequested: {
+            from: 'failed',
+            to: 'loadingPage',
+            on: 'retry.next',
+        },
 
-    const requestIds: bigint[] = [];
-    let after: ProofRequestHistoryCursor | undefined;
-    for (;;) {
-        const page = await fetchProofRequestsByTarget(
-            request.proofQueueAddress,
-            {
-                ...query,
-                toBlock,
-                order: 'asc',
-                pageSize: COUNTING_PAGE_SIZE,
-                after,
-            },
-            request.provider
-        );
-        requestIds.push(
-            ...page.requests.map((proofRequest) => proofRequest.requestId)
-        );
-        after = page.cursor;
-        if (page.done) break;
-    }
+        closedWhileLoading: {
+            from: 'loadingPage',
+            to: 'closed',
+            on: 'close.next',
+        },
+        closedWhileWaitingForMore: {
+            from: 'waitingForMore',
+            to: 'closed',
+            on: 'close.next',
+        },
+        closedWhileWaitingForConnection: {
+            from: 'waitingForConnection',
+            to: 'closed',
+            on: 'close.next',
+        },
+        closedWhileFailed: {
+            from: 'failed',
+            to: 'closed',
+            on: 'close.next',
+        },
+    },
+});
 
-    const { queueCursor } = await fetchBridgeState(
-        request.rpc,
-        request.programAddress ?? TOKEN_PROGRAM_ADDRESS
-    );
-    const proofAvailable = requestIds.filter(
-        (requestId) => requestId < queueCursor
-    ).length;
-    return {
-        total: requestIds.length,
-        proofAvailable,
-        unprocessed: requestIds.length - proofAvailable,
-    };
-}
+/** The paged history's state: a node of the graph and its data. */
+export type ProofRequestHistoryState = StateUnion<
+    typeof ProofRequestHistoryGraph.nodes
+>;

@@ -2,8 +2,8 @@ import {
     fetchProofRequestCountsByTarget,
     fetchProofRequestHistoryPage,
     type ProofRequestHistoryEntry,
-} from '../../proofRequest/proofRequestHistory.js';
-import { createProofRequestHistoryMachine } from '../../proofRequest/ystate/proofRequestHistory.impl.js';
+} from '../../proofRequest/fetchProofRequestHistory.js';
+import { createProofRequestHistoryMachine } from '../../proofRequest/proofRequestHistory.impl.js';
 import {
     createContiguousBatches,
     createFakeEthereumProvider,
@@ -50,8 +50,8 @@ async function setUp(queueCursor = 16) {
     const solana = await createFakeSolanaRpc(batchesUpTo(queueCursor));
     const test = createTestConnections(ethereum.provider, solana.rpc);
     await Promise.all([
-        reach(test.connections.ethereum.ethereumProviderConnectivity, 'ready'),
-        reach(test.connections.solana.solanaRpcConnectivity, 'ready'),
+        reach(test.connections.ethereum.http.connection, 'ready'),
+        reach(test.connections.solana.http.connection, 'ready'),
     ]);
     return { ethereum, solana, ...test };
 }
@@ -60,7 +60,9 @@ describe('proof request history reads', () => {
     test('a page classifies each request against the committed batches', async () => {
         const { ethereum, solana, close } = await setUp();
         const page = await fetchProofRequestHistoryPage(
-            { ...addresses, provider: ethereum.provider, rpc: solana.rpc },
+            ethereum.provider,
+            solana.rpc,
+            addresses,
             { target: TARGET_A, fromBlock: 0, order: 'asc', pageSize: 10 }
         );
         expect(page.entries.map(describeEntry)).toEqual([
@@ -91,13 +93,8 @@ describe('proof request history reads', () => {
 
     test('counts proven and unprocessed requests per submitting address', async () => {
         const { ethereum, solana, close } = await setUp();
-        const request = {
-            ...addresses,
-            provider: ethereum.provider,
-            rpc: solana.rpc,
-        };
         expect(
-            await fetchProofRequestCountsByTarget(request, {
+            await fetchProofRequestCountsByTarget(ethereum.provider, solana.rpc, addresses, {
                 target: TARGET_A,
                 fromBlock: 0,
             })
@@ -150,7 +147,7 @@ describe('proof request history machine', () => {
         await reach(proofRequestHistory, 'waitingForMore');
         network$.next('offline');
         await reach(
-            connections.ethereum.ethereumProviderConnectivity,
+            connections.ethereum.http.connection,
             'offline'
         );
         loadMore();

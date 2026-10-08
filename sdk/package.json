@@ -1,6 +1,6 @@
 {
     "name": "@nori-zk/nori-bridge-solana-sdk",
-    "version": "0.0.5",
+    "version": "0.1.0",
     "description": "Nori bridge Solana SDK: track Ethereum proof requests through the bridge to Solana and build their witnesses",
     "author": "",
     "license": "Apache-2.0",
@@ -26,20 +26,11 @@
         ".": {
             "import": "./build/index.js"
         },
+        "./utils": {
+            "import": "./build/utils/index.js"
+        },
         "./program": {
             "import": "./build/program/index.js"
-        },
-        "./rx/connectivity": {
-            "import": "./build/rx/connectivity.js"
-        },
-        "./rx/proofRequest": {
-            "import": "./build/rx/proofRequest.js"
-        },
-        "./rx/socket": {
-            "import": "./build/rx/socket.js"
-        },
-        "./rx/topics": {
-            "import": "./build/rx/topics.js"
         }
     },
     "scripts": {

@@ -1,9 +1,9 @@
-import { EthRpcTransportError } from '../../proofRequest/rpc/eth/errors.js';
+import { EthRpcTransportError } from '../../rpc/eth/errors.js';
 import {
     fetchProofRequestsByTarget,
     type ProofRequestHistoryCursor,
     type ProofRequestHistoryOrder,
-} from '../../proofRequest/rpc/eth/fetchProofRequestsByTarget.js';
+} from '../../rpc/eth/fetchProofRequestsByTarget.js';
 import {
     createFakeEthereumProvider,
     createRandom,
@@ -49,7 +49,8 @@ describe('fetchProofRequestsByTarget', () => {
         for (let pages = 0; ; pages++) {
             if (pages > 500) throw new Error('pagination did not finish');
             const page = await fetchProofRequestsByTarget(
-                QUEUE_ADDRESS,
+                provider,
+QUEUE_ADDRESS,
                 {
                     target: TARGET_A,
                     fromBlock: 900,
@@ -57,9 +58,7 @@ describe('fetchProofRequestsByTarget', () => {
                     pageSize,
                     after,
                     maxBlockRangePerQuery,
-                },
-                provider
-            );
+                }            );
             expect(page.requests.length).toBeLessThanOrEqual(pageSize);
             ids.push(...page.requests.map((request) => request.requestId));
             after = page.cursor;
@@ -92,10 +91,9 @@ describe('fetchProofRequestsByTarget', () => {
             latestBlock: 5000,
         });
         const page = await fetchProofRequestsByTarget(
-            QUEUE_ADDRESS,
-            { target: TARGET_B, fromBlock: 900, order: 'asc', pageSize: 1000 },
-            provider
-        );
+            provider,
+QUEUE_ADDRESS,
+            { target: TARGET_B, fromBlock: 900, order: 'asc', pageSize: 1000 }        );
         expect(
             page.requests.every((request) => request.target === TARGET_B)
         ).toBe(true);
@@ -111,16 +109,15 @@ describe('fetchProofRequestsByTarget', () => {
         });
         const after = { requestId: 999n, blockNumber: 5000 };
         const page = await fetchProofRequestsByTarget(
-            QUEUE_ADDRESS,
+            provider,
+QUEUE_ADDRESS,
             {
                 target: TARGET_A,
                 fromBlock: 900,
                 order: 'asc',
                 pageSize: 5,
                 after,
-            },
-            provider
-        );
+            }        );
         expect(page).toEqual({ requests: [], cursor: after, done: true });
     });
 
@@ -130,10 +127,9 @@ describe('fetchProofRequestsByTarget', () => {
         });
         await expect(
             fetchProofRequestsByTarget(
-                QUEUE_ADDRESS,
-                { target: TARGET_A, fromBlock: 0, order: 'asc', pageSize: 0 },
-                provider
-            )
+                provider,
+QUEUE_ADDRESS,
+                { target: TARGET_A, fromBlock: 0, order: 'asc', pageSize: 0 }            )
         ).rejects.toBeInstanceOf(RangeError);
     });
 
@@ -144,16 +140,15 @@ describe('fetchProofRequestsByTarget', () => {
         state.failNextReads = Infinity;
         await expect(
             fetchProofRequestsByTarget(
-                QUEUE_ADDRESS,
+                provider,
+QUEUE_ADDRESS,
                 {
                     target: TARGET_A,
                     fromBlock: 900,
                     toBlock: 1000,
                     order: 'asc',
                     pageSize: 5,
-                },
-                provider
-            )
+                }            )
         ).rejects.toBeInstanceOf(EthRpcTransportError);
     });
 });

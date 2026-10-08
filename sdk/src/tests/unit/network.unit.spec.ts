@@ -1,5 +1,5 @@
 import { jest } from '@jest/globals';
-import { createNetworkMachine } from '../../proofRequest/rpc/ystate/network.impl.js';
+import { createNetworkMachine } from '../../rpc/connection/network.impl.js';
 import { reach, recordNodes, sleep } from '../testUtils.js';
 
 describe('network machine', () => {

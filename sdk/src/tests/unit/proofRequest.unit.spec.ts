@@ -1,4 +1,4 @@
-import { createProofRequestStateMachine } from '../../proofRequest/ystate/proofRequest.impl.js';
+import { createProofRequestStateMachine } from '../../proofRequest/proofRequest.impl.js';
 import { ProofRequestState } from '../../proofRequest/types.js';
 import {
     createContiguousBatches,
@@ -32,8 +32,8 @@ async function setUp(latestBlock: number, queueCursor: number) {
     const solana = await createFakeSolanaRpc(batchesUpTo(queueCursor));
     const test = createTestConnections(ethereum.provider, solana.rpc);
     await Promise.all([
-        reach(test.connections.ethereum.ethereumProviderConnectivity, 'ready'),
-        reach(test.connections.solana.solanaRpcConnectivity, 'ready'),
+        reach(test.connections.ethereum.http.connection, 'ready'),
+        reach(test.connections.solana.http.connection, 'ready'),
     ]);
     return { ethereum, solana, ...test };
 }

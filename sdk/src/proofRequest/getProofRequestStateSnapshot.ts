@@ -6,16 +6,12 @@ import {
 } from '@solana/kit';
 import { type EthereumProvider } from '@nori-zk/ethereum-solana-bridge/iso-provider';
 import { classifyProofRequests } from './classifyProofRequests.js';
-import { findRequestIdByTxHash } from './rpc/eth/fetchProofRequest.js';
-import { fetchProofRequestBatch } from './rpc/eth/fetchProofRequestBatch.js';
+import { findRequestIdByTxHash } from '../rpc/eth/fetchProofRequest.js';
+import { fetchProofRequestBatch } from '../rpc/eth/fetchProofRequestBatch.js';
 import { request_witness, type RequestWitness } from '@nori-zk/ethereum-solana-proof-queue-utils-glam';
-import type { ProofRequestStateGraph } from './ystate/proofRequest.js';
+import type { ProofRequestStateGraph } from './proofRequest.js';
 
 export interface ProofRequestStateSnapshotRequest {
-    /** Solana RPC node. Solana wallets do not serve reads, so this is always an RPC node. */
-    rpc: Rpc<GetAccountInfoApi & GetMultipleAccountsApi>;
-    /** Ethereum provider: the user's wallet, or an RPC node. */
-    provider: EthereumProvider;
     /** The Ethereum `NoriProofRequestQueue` address. */
     proofQueueAddress: string;
     /** The Ethereum transaction that enqueued the proof request. */
@@ -36,22 +32,26 @@ export type ProofRequestStateSnapshot =
 /**
  * Discovers where a proof request is, from Ethereum and Solana alone.
  *
- * @param request The clients, addresses and the transaction that enqueued the request.
+ * @param provider The Ethereum provider.
+ * @param rpc The Solana RPC.
+ * @param request The addresses and the transaction that enqueued the request.
  * @returns The unprocessed or proof available state data.
  * @throws ProofRequestTransactionNotMinedError When the transaction is not mined yet.
  * @throws EthRpcTransportError When an Ethereum read still fails after its retries.
  * @throws SolanaRpcTransportError When a Solana read still fails after its retries.
  */
 export async function getProofRequestStateSnapshot(
+    provider: EthereumProvider,
+    rpc: Rpc<GetAccountInfoApi & GetMultipleAccountsApi>,
     request: ProofRequestStateSnapshotRequest
 ): Promise<ProofRequestStateSnapshot> {
     const { requestId, blockNumber } = await findRequestIdByTxHash(
+        provider,
         request.proofQueueAddress,
-        request.proofRequestTxHash,
-        request.provider
+        request.proofRequestTxHash
     );
     const [snapshot] = await classifyProofRequests(
-        request.rpc,
+        rpc,
         [{ requestId, requestBlockNumber: BigInt(blockNumber) }],
         request.programAddress
     );
@@ -76,22 +76,24 @@ export class ProofRequestWitnessRootMismatchError extends Error {
  * guest's own hashing, compiled to WebAssembly), checked against the batch
  * root committed on Solana.
  *
+ * @param provider The Ethereum provider.
  * @param proofAvailable The proof available state data.
- * @param request The connections and the transaction that enqueued the request.
+ * @param proofQueueAddress The Ethereum `NoriProofRequestQueue` address.
  * @returns The request's leaf, its bottom-up path and the batch root.
  * @throws ProofRequestWitnessRootMismatchError When the rebuilt root differs from the committed root.
  */
 export async function fetchProofRequestWitness(
+    provider: EthereumProvider,
     proofAvailable: (typeof ProofRequestStateGraph.nodes)['proofAvailable'],
-    request: Pick<ProofRequestStateSnapshotRequest, 'provider' | 'proofQueueAddress'>
+    proofQueueAddress: string
 ): Promise<RequestWitness> {
     const leaves = await fetchProofRequestBatch(
-        request.proofQueueAddress,
+        provider,
+        proofQueueAddress,
         proofAvailable.inputQueueCursor,
         proofAvailable.outputQueueCursor,
         Number(proofAvailable.previousOutputBlockNumber),
-        Number(proofAvailable.outputBlockNumber),
-        request.provider
+        Number(proofAvailable.outputBlockNumber)
     );
     const witness = request_witness({ leaves, index: Number(proofAvailable.indexInBatch) });
     if (witness.root !== proofAvailable.root.toLowerCase()) {

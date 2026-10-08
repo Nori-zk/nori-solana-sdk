@@ -1,6 +1,6 @@
-import { findProofQueueBatch } from '../../proofRequest/rpc/solana/findProofQueueBatch.js';
-import { findProofQueueBatchesForRequests } from '../../proofRequest/rpc/solana/findProofQueueBatchesForRequests.js';
-import { ProofQueueBatchSearchError } from '../../proofRequest/rpc/solana/errors.js';
+import { findProofQueueBatch } from '../../rpc/solana/findProofQueueBatch.js';
+import { findProofQueueBatchesForRequests } from '../../rpc/solana/findProofQueueBatchesForRequests.js';
+import { ProofQueueBatchSearchError } from '../../rpc/solana/errors.js';
 import {
     createContiguousBatches,
     createFakeSolanaRpc,

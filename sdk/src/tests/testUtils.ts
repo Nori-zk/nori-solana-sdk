@@ -5,9 +5,7 @@ import {
     BehaviorSubject,
     filter,
     firstValueFrom,
-    NEVER,
     type Observable,
-    ReplaySubject,
     Subject,
 } from 'rxjs';
 import { NoriProofRequestQueue__factory } from '@nori-zk/ethereum-solana-bridge';
@@ -17,14 +15,12 @@ import { getProofRequestRootEntryEncoder } from '../program/accounts/proofReques
 import { findStatePda } from '../program/pdas/state.js';
 import { TOKEN_PROGRAM_ADDRESS } from '../program/programs/token.js';
 import { type ProofRequestConnections } from '../proofRequest/connectedRead.js';
-import { findProofQueueBatchPda } from '../proofRequest/rpc/solana/findProofQueueBatchPda.js';
-import { SolanaRpcTransportError } from '../proofRequest/rpc/solana/errors.js';
-import type { SolanaRpc } from '../proofRequest/rpc/solana/solanaRpc.js';
-import { createEthereumProviderConnectivityMachine } from '../proofRequest/rpc/eth/ystate/ethereumProviderConnectivity.impl.js';
-import { createSolanaRpcConnectivityMachine } from '../proofRequest/rpc/solana/ystate/solanaRpcConnectivity.impl.js';
-import { stateOf$, type StartedMachine } from '../proofRequest/ystate/dataOnEntry.js';
-import { type EthereumProviderConnection } from '../proofRequest/rpc/eth/ystate/ethereumProviderConnectivity.js';
-import { type SolanaRpcConnection } from '../proofRequest/rpc/solana/ystate/solanaRpcConnectivity.js';
+import { findProofQueueBatchPda } from '../rpc/solana/findProofQueueBatchPda.js';
+import { SolanaRpcTransportError } from '../rpc/solana/errors.js';
+import type { SolanaHealth, SolanaRpc } from '../rpc/solana/solanaHttp.js';
+import type { EthereumHealth } from '../rpc/eth/ethereumHttp.js';
+import { httpConnection } from '../rpc/connection/httpConnection.impl.js';
+import { ethereumChain, solanaChain, type SolanaTransports } from '../rpc/connection/connections.js';
 
 export const QUEUE_ADDRESS = getAddress('0x' + '11'.repeat(20));
 export const TARGET_A = getAddress('0x' + 'aa'.repeat(20));
@@ -367,53 +363,41 @@ export function createTestConnections(
 
     const ethereumReadFailed$ = new Subject<void>();
     const ethereumClose$ = new Subject<void>();
-    const ethereumStarted$ = new ReplaySubject<StartedMachine<EthereumProviderConnection>>(1);
-    const ethereumProviderConnectivity =
-        createEthereumProviderConnectivityMachine({
-            ...FAST_TIMINGS,
-            expectedChainId: EXPECTED_CHAIN_ID,
-            checkHealth: async () => {
-                if (!world.ethereumAnswers)
-                    throw new Error('The Ethereum node did not answer.');
-                return {
-                    outcome: 'onExpectedChain',
-                    chainId: EXPECTED_CHAIN_ID,
-                    blockNumber: 1,
-                    checkedAt: 0,
-                };
-            },
-            walletOnExpectedChain$: NEVER,
-            walletNotOnExpectedChain$: NEVER,
-            walletConnected$: NEVER,
-            walletDisconnected$: NEVER,
-            networkWentOffline$: network$.pipe(
-                filter((status) => status === 'offline')
-            ),
-            networkCameOnline$: network$.pipe(
-                filter((status) => status === 'online')
-            ),
-            readFailed$: ethereumReadFailed$,
-            close$: ethereumClose$,
-            connection$: stateOf$(ethereumStarted$),
-        })
-            .close()
-            .start('checking');
-    ethereumStarted$.next(ethereumProviderConnectivity);
+    const ethereumConnection = httpConnection<EthereumHealth>({
+        ...FAST_TIMINGS,
+        urls: ['https://ethereum.test'],
+        checkHealth: async (url) => {
+            if (!world.ethereumAnswers)
+                throw new Error('The Ethereum node did not answer.');
+            return {
+                outcome: 'onExpectedNetwork',
+                url,
+                health: { blockNumber: 1 },
+                checkedAt: 0,
+            };
+        },
+        networkWentOffline$: network$.pipe(
+            filter((status) => status === 'offline')
+        ),
+        networkCameOnline$: network$.pipe(
+            filter((status) => status === 'online')
+        ),
+        readFailed$: ethereumReadFailed$,
+        close$: ethereumClose$,
+    });
 
     const solanaReadFailed$ = new Subject<void>();
     const solanaClose$ = new Subject<void>();
-    const solanaStarted$ = new ReplaySubject<StartedMachine<SolanaRpcConnection>>(1);
-    const solanaRpcConnectivity = createSolanaRpcConnectivityMachine({
+    const solanaConnection = httpConnection<SolanaHealth>({
         ...FAST_TIMINGS,
-        expectedGenesisHash: EXPECTED_GENESIS_HASH,
-        rpcUrls: ['https://solana.test'],
-        checkHealth: async (rpcUrl) => {
+        urls: ['https://solana.test'],
+        checkHealth: async (url) => {
             if (!world.solanaAnswers)
                 throw new Error('The Solana node did not answer.');
             return {
-                outcome: 'onExpectedCluster',
-                rpcUrl,
-                slot: 1n,
+                outcome: 'onExpectedNetwork',
+                url,
+                health: { slot: 1n },
                 checkedAt: 0,
             };
         },
@@ -425,36 +409,62 @@ export function createTestConnections(
         ),
         readFailed$: solanaReadFailed$,
         close$: solanaClose$,
-        connection$: stateOf$(solanaStarted$),
-    })
-        .close()
-        .start('checking');
-    solanaStarted$.next(solanaRpcConnectivity);
+    });
+
+    const reportSolanaReadFailed = () => {
+        solanaReadFailures.count++;
+        if (world.solanaGoesDownOnReadFailure) world.solanaAnswers = false;
+        solanaReadFailed$.next();
+    };
+    // As the real transport does: a request that got no response tells the machine.
+    const reportingRpc = new Proxy(rpc, {
+        get: (target, key) => {
+            const method: unknown = Reflect.get(target, key);
+            if (typeof method !== 'function') return method;
+            return (...args: unknown[]) => {
+                const pending = (method as (...a: unknown[]) => { send(): Promise<unknown> }).apply(
+                    target,
+                    args
+                );
+                return {
+                    send: () =>
+                        pending.send().catch((error: unknown) => {
+                            if (error instanceof SolanaRpcTransportError) reportSolanaReadFailed();
+                            throw error;
+                        }),
+                };
+            };
+        },
+    });
 
     const connections: ProofRequestConnections = {
-        ethereum: {
-            ethereumProviderConnectivity,
-            wallet: undefined,
-            currentProvider: () => provider,
-            reportReadFailed: () => {
-                ethereumReadFailures.count++;
-                if (world.ethereumGoesDownOnReadFailure)
-                    world.ethereumAnswers = false;
-                ethereumReadFailed$.next();
+        ethereum: ethereumChain({
+            http: {
+                connection: ethereumConnection,
+                current: () => provider,
+                reportReadFailed: () => {
+                    ethereumReadFailures.count++;
+                    if (world.ethereumGoesDownOnReadFailure)
+                        world.ethereumAnswers = false;
+                    ethereumReadFailed$.next();
+                },
+                close: () => ethereumClose$.next(),
             },
-            close: () => ethereumClose$.next(),
-        },
-        solana: {
-            solanaRpcConnectivity,
-            currentRpc: () => rpc,
-            reportReadFailed: () => {
-                solanaReadFailures.count++;
-                if (world.solanaGoesDownOnReadFailure)
-                    world.solanaAnswers = false;
-                solanaReadFailed$.next();
+        }),
+        solana: solanaChain({
+            http: {
+                connection: solanaConnection,
+                current: () => reportingRpc,
+                reportReadFailed: reportSolanaReadFailed,
+                close: () => solanaClose$.next(),
             },
-            close: () => solanaClose$.next(),
-        },
+            // The reading machines never use Solana's websocket: one that stays closed.
+            websocket: {
+                connection: { state$: new BehaviorSubject({ node: 'closed', data: {} }) },
+                socket: new Subject(),
+                close: (): void => undefined,
+            } as unknown as SolanaTransports['websocket'],
+        }),
     };
     return {
         connections,

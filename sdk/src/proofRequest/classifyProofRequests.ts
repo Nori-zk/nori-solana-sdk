@@ -6,11 +6,11 @@ import {
     type Rpc,
 } from '@solana/kit';
 import { TOKEN_PROGRAM_ADDRESS } from '../program/programs/token.js';
-import { ProofQueueBatchSearchError } from './rpc/solana/errors.js';
-import { fetchBridgeState } from './rpc/solana/fetchBridgeState.js';
-import { fetchProofQueueBatches } from './rpc/solana/fetchProofQueueBatches.js';
-import { findProofQueueBatchesForRequests } from './rpc/solana/findProofQueueBatchesForRequests.js';
-import { findProofQueueBatchPda } from './rpc/solana/findProofQueueBatchPda.js';
+import { ProofQueueBatchSearchError } from '../rpc/solana/errors.js';
+import { fetchBridgeState } from '../rpc/solana/fetchBridgeState.js';
+import { fetchProofQueueBatches } from '../rpc/solana/fetchProofQueueBatches.js';
+import { findProofQueueBatchesForRequests } from '../rpc/solana/findProofQueueBatchesForRequests.js';
+import { findProofQueueBatchPda } from '../rpc/solana/findProofQueueBatchPda.js';
 import { ProofRequestState } from './types.js';
 import type { ProofRequestStateSnapshot } from './getProofRequestStateSnapshot.js';
 

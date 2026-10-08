@@ -1,7 +1,7 @@
 import { type RunningMachine } from '@yaw-rx/ystate';
 import { filter, firstValueFrom, map } from 'rxjs';
-import { type ProofRequestHistoryEntry } from '../../proofRequest/proofRequestHistory.js';
-import { createLatestProofRequestsMachine } from '../../proofRequest/ystate/latestProofRequests.impl.js';
+import { type ProofRequestHistoryEntry } from '../../proofRequest/fetchProofRequestHistory.js';
+import { createLatestProofRequestsMachine } from '../../proofRequest/latestProofRequests.impl.js';
 import {
     createContiguousBatches,
     createFakeEthereumProvider,
@@ -45,8 +45,8 @@ async function setUp(requests: FakeProofRequest[], queueCursor: number) {
     const solana = await createFakeSolanaRpc(batchesUpTo(queueCursor));
     const test = createTestConnections(ethereum.provider, solana.rpc);
     await Promise.all([
-        reach(test.connections.ethereum.ethereumProviderConnectivity, 'ready'),
-        reach(test.connections.solana.solanaRpcConnectivity, 'ready'),
+        reach(test.connections.ethereum.http.connection, 'ready'),
+        reach(test.connections.solana.http.connection, 'ready'),
     ]);
     return { ethereum, solana, ...test };
 }
