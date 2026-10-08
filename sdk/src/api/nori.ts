@@ -10,6 +10,20 @@ import {
 } from '../rpc/nori/topics.js';
 
 export { NoriBridgeInfraTransitionGraph, type NoriBridgeInfraTransitionState } from '../rpc/nori/noriBridgeInfraTransitions.js';
+export {
+    ETHEREUM_EPOCH_SEC,
+    FALLBACK_NORI_JOB_TIMINGS,
+    getCommitTimes,
+    getFinalityTimeRemainingSec,
+    jobTimingsOf,
+    MAX_BATCH_SIZE,
+    NORI_JOB_STAGES,
+    type CommitTimes,
+    type EthereumFinality,
+    type NoriJobStage,
+    type NoriJobTimings,
+    type NoriStage,
+} from '../rpc/nori/commitTimes.js';
 export { type NoriBridgeInfraTransitions } from '../rpc/nori/noriBridgeInfraTransitions.impl.js';
 
 /**

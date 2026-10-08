@@ -16,10 +16,20 @@ const topicsBySocket = new WeakMap<
     Map<NoriTopic, Observable<WebSocketServiceTopicSubscriptionMessage>>
 >();
 
+/** The topics the server sends its current value on when one subscribes; every other topic is live only. */
+const TOPICS_WITH_CURRENT_VALUE: ReadonlySet<NoriTopic> = new Set<NoriTopic>([
+    'state.bridge',
+    'state.eth',
+    'timings.notices.transition',
+]);
+
 /**
  * Returns an observable emitting one topic's messages. The topic is
  * subscribed on the server while anyone listens, through `multiplex`: again
  * every time the socket opens, and unsubscribed when the last listener stops.
+ * Every listener shares the one server subscription; on a topic the server
+ * sends its current value for, a listener joining later gets the latest
+ * message the first listener received.
  *
  * @param noriSocket Nori's reconnecting websocket.
  * @param topic The topic.
@@ -43,7 +53,11 @@ const getTopic$ = (noriSocket: ReconnectingWebSocketSubject<unknown>, topic: Nor
                     'topic' in message &&
                     message.topic === topic
             )
-            .pipe(share());
+            .pipe(
+                TOPICS_WITH_CURRENT_VALUE.has(topic)
+                    ? shareReplay({ bufferSize: 1, refCount: true })
+                    : share()
+            );
         topics.set(topic, topic$);
     }
     return topic$;

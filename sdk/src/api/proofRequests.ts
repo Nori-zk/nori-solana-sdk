@@ -60,6 +60,11 @@ export {
     type UnprocessedProofRequestStateNodeUnion,
 } from '../proofRequest/unprocessed.js';
 export { BridgeProofRequestProcessingStatus } from '../rpc/nori/proofRequest.js';
+export {
+    sortWaitingProofRequests,
+    type NoriJob,
+    type WaitingProofRequests,
+} from '../proofRequest/waitingProofRequests.js';
 
 // Types and errors.
 export { ProofRequestState } from '../proofRequest/types.js';

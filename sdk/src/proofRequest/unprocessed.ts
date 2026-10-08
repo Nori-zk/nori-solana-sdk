@@ -13,6 +13,10 @@ export type UnprocessedProofRequestStateData = BridgeState & {
     time_remaining_sec: number;
     proof_request_processing_status: BridgeProofRequestProcessingStatus;
     proof_request_block_number: number;
+    /** Seconds until the batch covering the request is committed on Solana; negative when overdue. */
+    commit_time_remaining_sec: number;
+    /** Seconds the request has spent in this node. */
+    waiting_elapsed_sec: number;
 };
 
 export const UnprocessedProofRequestStateGraph = define({
@@ -33,6 +37,21 @@ export const UnprocessedProofRequestStateGraph = define({
             from: 'WaitingForEthFinality',
             to: 'WaitingForEthFinality',
             on: 'tickWaitingForEthFinality.next',
+        },
+        ethFinalityRechecked: {
+            from: 'WaitingForEthFinality',
+            to: 'WaitingForEthFinality',
+            on: 'checkWhetherWaitingForEthFinality.next',
+        },
+        previousProofRequestsRechecked: {
+            from: 'WaitingForPreviousJobCompletion',
+            to: 'WaitingForPreviousJobCompletion',
+            on: 'checkWhetherWaitingForPreviousJobCompletion.next',
+        },
+        currentProofRequestRechecked: {
+            from: 'WaitingForCurrentJobCompletion',
+            to: 'WaitingForCurrentJobCompletion',
+            on: 'checkWhetherWaitingForCurrentJobCompletion.next',
         },
         ethFinalityReached: {
             from: 'WaitingForEthFinality',
