@@ -241,7 +241,35 @@ To resume a request whose state the app already knows, pass that snapshot as the
 
 ![Unprocessed proof request state graph](src/proofRequest/UnprocessedProofRequestStateGraph.svg)
 
-Nori's bridge infra state says what an unprocessed request is waiting on: Ethereum finality for its block, the job ahead of it, then the job that includes it. `createUnprocessedProofRequestStateMachine(blockNumber, nori)` follows these from the request's block number and Nori's state, timings and Ethereum state, with an estimate of the time remaining in each state's data.
+Nori's bridge infra state says what an unprocessed request is waiting on: Ethereum finality for its block, the job ahead of it, then the job that includes it. `createUnprocessedProofRequestStateMachine(blockNumber, nori)` follows these from the request's block number and Nori's state, timings and Ethereum state. Every new `state.eth`, `state.bridge` or timings message recomputes where the request waits and how long it has left, and the estimate counts down each second in between. Each state's data carries `time_remaining_sec` for the step it is in, `commit_time_remaining_sec` until the batch covering the request is committed on Solana (negative once that is taking longer than expected), and `waiting_elapsed_sec` for how long it has been in that state, which together draw a progress bar.
+
+Nori creates a job on each Ethereum finality transition, one epoch (`ETHEREUM_EPOCH_SEC`, 384 s) after the last, proving the epoch's blocks, and commits it on Solana when it finishes; a job takes at most `MAX_BATCH_SIZE` (2¹⁶) requests. A job goes through the stages in `NORI_JOB_STAGES`: proving it (`BridgeHeadJobCreated`, `BridgeHeadJobSucceeded`), then submitting it to Solana (`EthProcessorTransactionSubmitting`, `EthProcessorTransactionSubmitSucceeded`); it is committed when it reaches `EthProcessorTransactionFinalizationSucceeded`. `getCommitTimes(stage, timings)` gives, from where Nori is in its loop, the seconds until the job it is running is committed and until the next job is committed. `jobTimingsOf(timings)` gives the seconds each job stage takes: Nori's timings where it reports them, and `FALLBACK_NORI_JOB_TIMINGS` (a proof about two minutes, submitting and finalization seconds) otherwise. `getFinalityTimeRemainingSec(blockNumber, finality)` gives the seconds until a block is finalized.
+
+## Where the waiting requests are
+
+`sortWaitingProofRequests(waiting, finalizedBlock, job?)` sorts the requests no batch covers yet into three sets, each oldest first: those whose block is not finalized yet, those finalized and scheduled for a later job, and those in the job Nori is running now. The first two come from Ethereum and Solana alone. Telling the job Nori is running apart from the later ones needs Nori's `state.bridge`; without it, every finalized request is scheduled.
+
+```ts
+import {
+    getBridgeState,
+    getEnqueuedProofRequests,
+    getFinalizedBlockNumber,
+    getLatestBlockHeight,
+    sortWaitingProofRequests,
+} from '@nori-zk/nori-bridge-solana-sdk';
+
+const { queueCursor } = await getBridgeState(solana);
+const waiting = await getEnqueuedProofRequests(ethereum, proofQueueAddress, {
+    fromBlock: queueDeploymentBlock,
+    toBlock: await getLatestBlockHeight(ethereum),
+    fromRequestId: queueCursor,
+});
+const { waitingForFinality, scheduled, processing } = sortWaitingProofRequests(
+    waiting,
+    await getFinalizedBlockNumber(ethereum),
+    bridgeState // the latest from getNoriBridgeInfraState$(nori), or undefined without Nori
+);
+```
 
 ## A submitting address's requests
 
