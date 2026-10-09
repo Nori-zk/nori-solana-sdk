@@ -1,9 +1,14 @@
 {
     "name": "@nori-zk/nori-bridge-solana-sdk",
-    "version": "0.0.1",
+    "version": "0.1.1",
     "description": "Nori bridge Solana SDK: track Ethereum proof requests through the bridge to Solana and build their witnesses",
     "author": "",
     "license": "Apache-2.0",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/Nori-zk/nori-solana-sdk.git",
+        "directory": "sdk"
+    },
     "keywords": [
         "nori",
         "bridge",
@@ -21,26 +26,17 @@
         ".": {
             "import": "./build/index.js"
         },
+        "./utils": {
+            "import": "./build/utils/index.js"
+        },
         "./program": {
             "import": "./build/program/index.js"
-        },
-        "./rx/connectivity": {
-            "import": "./build/rx/connectivity.js"
-        },
-        "./rx/proofRequest": {
-            "import": "./build/rx/proofRequest.js"
-        },
-        "./rx/socket": {
-            "import": "./build/rx/socket.js"
-        },
-        "./rx/topics": {
-            "import": "./build/rx/topics.js"
         }
     },
     "scripts": {
         "clean": "rimraf build",
+        "prebuild": "npm run generate:client",
         "build": "npm run clean && tsc",
-        "build:cache-layouts": "node --experimental-vm-modules build/bin/buildCacheServerLayouts.js",
         "buildw": "tsc --watch",
         "coverage": "node --experimental-vm-modules ../node_modules/jest/bin/jest.js --coverage --runInBand",
         "format": "prettier --check --ignore-unknown **/*",
@@ -51,8 +47,8 @@
         "test:e2e": "for f in $(find src -name '*.e2e.spec.ts'); do node --experimental-vm-modules ../node_modules/jest/bin/jest.js --runInBand --forceExit \"$f\" || exit 1; done",
         "test-ci": "npm run test:unit",
         "testw": "node --experimental-vm-modules ../node_modules/jest/bin/jest.js --watch --runInBand",
-        "lint": "npx eslint src/*",
-        "lint:fix": "npx eslint src/* --fix",
+        "lint": "npx eslint src",
+        "lint:fix": "npx eslint src --fix",
         "generate:client": "node scripts/generate-client.mjs"
     },
     "devDependencies": {
@@ -79,9 +75,9 @@
     },
     "dependencies": {
         "@nori-zk/ethereum-solana-bridge": "*",
-        "@nori-zk/nori-hash-utils": "*",
+        "@nori-zk/ethereum-solana-proof-queue-utils-glam": "0.0.1",
         "@nori-zk/pts-types": "7.0.2",
-        "@yaw-rx/ystate": "^0.0.2",
+        "@yaw-rx/ystate": "^0.1.0",
         "esm-iso-logger": "1.0.2",
         "ethers": "^6.16.0",
         "rxjs": "^7.8.2",

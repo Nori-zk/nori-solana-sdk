@@ -13,7 +13,14 @@ export type CreateEthereumProviderOptions = {
     injectedProvider?: Eip1193Provider;
 };
 
-function parseRpcUrl(rpcUrl: string): string {
+/**
+ * Checks an Ethereum RPC URL is an absolute HTTP(S) URL.
+ *
+ * @param rpcUrl The URL to check.
+ * @returns The URL, normalised.
+ * @throws When the URL is not absolute or not HTTP(S).
+ */
+export function parseRpcUrl(rpcUrl: string): string {
     let url: URL;
 
     try {
@@ -51,8 +58,13 @@ export function createEthereumProvider({
 
 let ethereumProvider: EthereumProvider | undefined;
 
-// Reads through globalThis so the same module works in Node and in browsers.
-function getRpcUrl(): string | undefined {
+/**
+ * The `ETH_RPC_URL` environment variable, read through `globalThis` so the
+ * same module works in Node and in browsers.
+ *
+ * @returns The configured RPC URL, or `undefined` when none is set.
+ */
+export function getRpcUrl(): string | undefined {
     return (
         globalThis as {
             process?: { env?: { ETH_RPC_URL?: string } };
@@ -60,7 +72,13 @@ function getRpcUrl(): string | undefined {
     ).process?.env?.ETH_RPC_URL;
 }
 
-function getInjectedProvider(): Eip1193Provider | undefined {
+/**
+ * The wallet's injected EIP-1193 provider (`window.ethereum`), read through
+ * `globalThis` so the same module works in Node and in browsers.
+ *
+ * @returns The injected provider, or `undefined` when there is none.
+ */
+export function getInjectedProvider(): Eip1193Provider | undefined {
     return (globalThis as { ethereum?: Eip1193Provider }).ethereum;
 }
 

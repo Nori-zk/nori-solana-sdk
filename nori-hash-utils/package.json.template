@@ -1,0 +1,23 @@
+{
+    "name": "@nori-zk/ethereum-solana-proof-queue-utils-glam",
+    "type": "module",
+    "version": "0.0.1",
+    "license": "Apache-2.0",
+    "publishConfig": {
+      "registry": "https://registry.npmjs.org/",
+      "access": "public"
+    },
+    "files": [
+      "nori_hash_utils_bg.wasm",
+      "nori_hash_utils.js",
+      "nori_hash_utils_bg.js",
+      "nori_hash_utils.d.ts",
+      "README.md"
+    ],
+    "main": "nori_hash_utils.js",
+    "types": "nori_hash_utils.d.ts",
+    "sideEffects": [
+      "./nori_hash_utils.js",
+      "./snippets/*"
+    ]
+  }

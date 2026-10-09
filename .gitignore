@@ -4,7 +4,6 @@ target
 **/*.rs.bk
 node_modules
 sdk/build
-nori-hash-utils/pkg
 test-ledger
 .yarn
 .surfpool

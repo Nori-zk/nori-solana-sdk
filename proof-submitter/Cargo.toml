@@ -5,30 +5,30 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-token = { path = "../programs/token" }
-sp1-solana = { git = "https://github.com/Nori-zk/sp1-solana", branch = "feat/sp1-v6-groth16-master-typed" }
-nori-sp1-helios-primitives = { git = "https://github.com/Nori-zk/nori-bridge-head", branch = "FEAT/solana-bridge" }
-alloy-primitives = { version = "1.7.1", features = ["borsh"] }
-anchor-lang = "1.1.2"
-anchor-spl = "1.1.2"
-bytemuck = { version = "1", features = ["derive"] }
+token = { workspace = true }
+sp1-solana = { workspace = true }
+nori-sp1-helios-primitives = { workspace = true }
+alloy-primitives = { workspace = true, features = ["borsh"] }
+anchor-lang = { workspace = true }
+anchor-spl = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { workspace = true }
 thiserror = "2"
-dotenvy = "0.15"
+dotenvy = { workspace = true }
 log = "0.4"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-solana-rpc-client = "3.1"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+solana-rpc-client = { workspace = true }
 solana-rpc-client-api = "3.1"
-solana-keypair = "3.0.1"
-solana-message = "3.0.1"
-solana-signer = "3.0.0"
-solana-transaction = "3.0.2"
+solana-keypair = { workspace = true }
+solana-message = { workspace = true }
+solana-signer = { workspace = true }
+solana-transaction = { workspace = true }
 solana-compute-budget-interface = "3.1"
 solana-loader-v3-interface = { version = "6", features = ["bincode"] }
 solana-signature = "3"
 solana-transaction-status-client-types = "3"
 
 [dev-dependencies]
-test-utils = { path = "../test-utils" }
-tokio ={ version = "1", features = ["macros", "rt-multi-thread"] }
+test-utils = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

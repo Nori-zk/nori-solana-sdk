@@ -28,8 +28,8 @@ baseline, scoped down for this route: one-way, lock only, no unlock path.
 | `proof-submitter/` | Client crate: proof-JSON loader + `SolanaProofSubmitter` (RPC `update` sender) |
 | `cli/` | `nori-cli` operator binary on top of `proof-submitter`: `initialize` for an already deployed program (DEPLOYMENT.md §6) |
 | `idl/`, `sdk/src/program/` | **Generated** from `programs/token` by `anchor idl build` and Codama (sdk/README.md "How to regenerate the Solana client"). Never hand-edit; regenerate with the program change |
-| `nori-hash-utils/` | Standalone crate (own Cargo workspace and lock) compiling nori-bridge-head's `nori-hash` to WebAssembly with `wasm-bindgen` + `tsify`; `pkg/` is build output |
-| `test-utils/` | Surfpool test harness (validator kill-on-drop, funded keypairs, CLI deploy, custom error codes); no dependency on `token`, so the program's own tests can use it |
+| `nori-hash-utils/` | Workspace crate compiling nori-bridge-head's `nori-hash` (without its default `helios` feature) to WebAssembly with `wasm-bindgen` + `tsify`; `pkg/` is build output |
+| `test-utils/` | Surfpool test harness (validator kill-on-drop, funded keypairs, CLI deploy incl. at a given program id, `set_account`/`time_travel` cheatcodes, `send` with compute units and logs, custom error codes); no dependency on `token` or Anchor, so the program's own tests and apps built on it can use it |
 | `proof-submitter/example-proofs/` | Four chained SP1 Groth16 proofs (no deposits) used by the test suites |
 | `DEPLOYMENT.md` | Production runbook (Safe → Timelock → ETH contracts → Solana program) |
 | `DEVELOPMENT_GUIDE.md` | Toolchain setup (Solana CLI, Anchor, Surfpool) |
@@ -57,6 +57,11 @@ cargo fmt --all --check                  # clean
 - **Alloy MSRV**: the SBF toolchain ships rustc 1.89; alloy 1.7+ requires
   1.91. Cargo.lock pins the alloy tree to 1.6.3 (MSRV 1.88). Do not
   `cargo update` the alloy crates past that without an SBF toolchain bump.
+- **Helios feature**: nori-bridge-head's helios 0.12.0 depends on alloy 2.x,
+  which requires rustc 1.94.1. The root `Cargo.toml` takes
+  `nori-sp1-helios-primitives` and `nori-hash` with `default-features = false`,
+  leaving out their `helios` feature, so neither helios nor alloy 2.x enters
+  the lock. Keep it that way without an SBF toolchain bump.
 - **getrandom 0.2** (via rand_core ← k256/bls12_381) has no backend cfg for
   the sbpf target; `programs/token/Cargo.toml` forces its `custom` feature,
   which unifies across the graph. Nothing on-chain calls getrandom.
@@ -108,3 +113,9 @@ cargo fmt --all --check                  # clean
 - `.env.nori-eth-token-bridge` / `.env.nori-eth-timelock` are gitignored
   deploy outputs; the `.example` files are the committed templates.
 - Keep README.md, DEPLOYMENT.md, and this file in sync with code changes.
+- Changing and releasing the sdk (`@nori-zk/nori-bridge-solana-sdk`), in this order:
+    1. Collect everything the apps need from it first, so one release covers it.
+    2. Explain each change and why, and ask. Change nothing until the user says yes.
+    3. Make the changes, bump the version (`package.json`, `sdk/package.json`, `package-lock.json`), and run its build, lint and unit tests.
+    4. `git add` the changed paths and give the user the commit message. The user commits and pushes.
+    5. Run `npm run publish -- --dry-run` (`nw-publish`) and report it. The user publishes.

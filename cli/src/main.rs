@@ -284,7 +284,7 @@ mod tests {
 
     const FIRST_PROOF: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../proof-submitter/example-proofs/11247328-v6.1.0.json"
+        "/../proof-submitter/example-proofs/11298112-v6.1.0.json"
     );
     const STATE_ROOT: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
     const BRIDGE: &str = "0x2222222222222222222222222222222222222222";
@@ -318,7 +318,7 @@ mod tests {
             "--eth-proof-queue-address",
             "0x4444444444444444444444444444444444444444",
             "--latest-head",
-            "11247328",
+            "11298112",
             "--queue-cursor",
             "7",
         ])
@@ -329,7 +329,7 @@ mod tests {
         assert_eq!(init.latest_helios_store_input_hash.0, [0x33; 32]);
         assert_eq!(init.eth_proof_queue_address.0, [0x44; 20]);
         assert_eq!(init.eth_token_bridge_address.0, [0x22; 20]);
-        assert_eq!(init.latest_head, 11_247_328);
+        assert_eq!(init.latest_head, 11_298_112);
         assert_eq!(init.queue_cursor, 7);
     }
 

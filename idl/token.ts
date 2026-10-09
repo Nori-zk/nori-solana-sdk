@@ -5,12 +5,12 @@
  * IDL can be found at `target/idl/token.json`.
  */
 export type Token = {
-  "address": "5xS32i7XNRk7JCjYR7RgfHVxdLepVSnnJ1gdHkmfD8W1",
+  "address": "EUz5RMQxYkc9zu12wpCDu9syvr4MarghoYb6jHAvdAcg",
   "metadata": {
     "name": "token",
     "version": "0.1.0",
     "spec": "0.1.0",
-    "description": "Created with Anchor"
+    "description": "Nori Solana bridge program: verifies SP1 Helios proofs of Ethereum finalized state"
   },
   "instructions": [
     {

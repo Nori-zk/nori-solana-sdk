@@ -17,7 +17,7 @@ export async function findTokenPda(
     config: { programAddress?: Address | undefined } = {}
 ): Promise<ProgramDerivedAddress> {
     const {
-        programAddress = '5xS32i7XNRk7JCjYR7RgfHVxdLepVSnnJ1gdHkmfD8W1' as Address<'5xS32i7XNRk7JCjYR7RgfHVxdLepVSnnJ1gdHkmfD8W1'>,
+        programAddress = 'EUz5RMQxYkc9zu12wpCDu9syvr4MarghoYb6jHAvdAcg' as Address<'EUz5RMQxYkc9zu12wpCDu9syvr4MarghoYb6jHAvdAcg'>,
     } = config;
     return await getProgramDerivedAddress({
         programAddress,

@@ -9,7 +9,7 @@
 //! `surfnet_setAccount` cheatcode, exactly as `update` would lay it out.
 
 use {
-    alloy_primitives::{hex, Address, B256, U256},
+    alloy_primitives::{Address, B256, U256},
     anchor_lang::{
         prelude::Pubkey,
         solana_program::{instruction::Instruction, system_instruction, system_program},
@@ -18,9 +18,11 @@ use {
     anchor_spl::associated_token::get_associated_token_address,
     nori_sp1_helios_primitives::storage_layout::MAX_COLLECTION_KEYS,
     solana_keypair::Keypair,
-    solana_rpc_client::{api::request::RpcRequest, nonblocking::rpc_client::RpcClient},
+    solana_rpc_client::nonblocking::rpc_client::RpcClient,
     solana_signer::Signer,
-    test_utils::{custom_error_code, deploy_program_with_cli, funded_keypair, Surfpool},
+    test_utils::{
+        custom_error_code, deploy_program_with_cli, funded_keypair, set_account, Surfpool,
+    },
     token::{
         deposit_witness::{VerifiedRequest, VerifiedRequestWitnessInput},
         state::{NoriSolTokenAccountStorage, NoriSolTokenBridgeInit, ProofRequestRootEntry},
@@ -182,28 +184,7 @@ async fn set_proof_queue_batch(
 ) {
     let mut data = Vec::new();
     entry.try_serialize(&mut data).unwrap();
-    let lamports = h
-        .client
-        .get_minimum_balance_for_rent_exemption(data.len())
-        .await
-        .unwrap();
-    h.client
-        .send::<serde_json::Value>(
-            RpcRequest::Custom {
-                method: "surfnet_setAccount",
-            },
-            serde_json::json!([
-                address.to_string(),
-                {
-                    "lamports": lamports,
-                    "data": hex::encode(&data),
-                    "owner": owner.to_string(),
-                    "executable": false,
-                }
-            ]),
-        )
-        .await
-        .expect("surfnet_setAccount");
+    set_account(&h.client, &address, &owner, &data).await;
 }
 
 /// Commit a one-request proof queue batch at index 0 whose root is the

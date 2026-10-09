@@ -1,7 +1,7 @@
 [package]
 name = "token"
 version = "0.1.0"
-description = "Created with Anchor"
+description = "Nori Solana bridge program: verifies SP1 Helios proofs of Ethereum finalized state"
 edition.workspace = true
 rust-version.workspace = true
 
@@ -21,28 +21,28 @@ custom-panic = []
 
 
 [dependencies]
-alloy-primitives = { version = "1.7.1", features = ["borsh"] }
-anchor-lang = "1.1.2"
-anchor-spl = "1.1.2"
-bytemuck = { version = "1", features = ["derive"] }
+alloy-primitives = { workspace = true, features = ["borsh"] }
+anchor-lang = { workspace = true }
+anchor-spl = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
 # Force the "custom" backend onto the transitive getrandom 0.2 build
 # (rand_core via k256/bls12_381); without a backend cfg the SBF target
 # fails to compile it. Nothing in the program calls getrandom on-chain.
 getrandom = { version = "0.2", features = ["custom"] }
 solana-sha256-hasher = "3.1.0"
-sp1-solana = { git = "https://github.com/Nori-zk/sp1-solana", branch = "feat/sp1-v6-groth16-master-typed" }
-nori-sp1-helios-primitives = { git = "https://github.com/Nori-zk/nori-bridge-head", branch = "FEAT/solana-bridge" }
-nori-elf = { git = "https://github.com/Nori-zk/nori-bridge-head", branch = "FEAT/solana-bridge" }
+sp1-solana = { workspace = true }
+nori-sp1-helios-primitives = { workspace = true }
+nori-elf = { workspace = true }
 
 [dev-dependencies]
-serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-solana-rpc-client = "3.1"
-solana-message = "3.0.1"
-solana-transaction = "3.0.2"
-solana-signer = "3.0.0"
-solana-keypair = "3.0.1"
-test-utils = { path = "../../test-utils" }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+solana-rpc-client = { workspace = true }
+solana-message = { workspace = true }
+solana-transaction = { workspace = true }
+solana-signer = { workspace = true }
+solana-keypair = { workspace = true }
+test-utils = { workspace = true }
 
 
 [lints.rust]
