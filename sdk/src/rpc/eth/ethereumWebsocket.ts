@@ -1,8 +1,8 @@
 import { BrowserProvider, Network } from 'ethers';
-import { filter } from 'rxjs';
+import { filter, firstValueFrom } from 'rxjs';
 import { type EthereumProvider } from '@nori-zk/ethereum-solana-bridge/iso-provider';
 import { resolveHealthCheckTimings } from '../connection/healthCheckTimings.js';
-import { jsonRpcRequest } from '../connection/jsonRpcTopic.js';
+import { jsonRpcRequest$ } from '../connection/jsonRpcTopic.js';
 import { type NetworkMachine } from '../connection/network.impl.js';
 import {
     type ReconnectingWebSocketConfig,
@@ -28,19 +28,22 @@ import {
  */
 export function ethereumWebsocket(
     config: ReconnectingWebSocketConfig<unknown>,
-    network: NetworkMachine['network'],
+    network: NetworkMachine,
     expectedChainId: bigint
 ) {
     const { socket, connection } = websocketConnection<unknown>(config, network);
     const { healthCheckTimeoutMs } = resolveHealthCheckTimings(config);
     const provider = new BrowserProvider(
         {
+            // ethers takes an EIP-1193 provider, whose `request` returns a promise.
             request: ({ method, params }) =>
-                jsonRpcRequest(
-                    socket,
-                    method,
-                    Array.isArray(params) ? params : params === undefined ? [] : [params],
-                    healthCheckTimeoutMs
+                firstValueFrom(
+                    jsonRpcRequest$(
+                        socket,
+                        method,
+                        Array.isArray(params) ? params : params === undefined ? [] : [params],
+                        healthCheckTimeoutMs
+                    )
                 ),
         },
         Network.from(expectedChainId),

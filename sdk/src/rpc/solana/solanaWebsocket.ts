@@ -16,8 +16,8 @@ export function solanaWebsocketUrlOf(rpcUrl: string): string {
 }
 
 /**
- * Opens a Solana RPC node's reconnecting websocket. Its subscriptions are
- * the topics of `topics.ts`.
+ * Opens a Solana RPC node's reconnecting websocket, which the Solana changes
+ * machine subscribes on.
  *
  * @param config The websocket URL, the attempts allowed and the timings.
  * @param network The running network machine the connection follows.
@@ -27,7 +27,7 @@ export function solanaWebsocketUrlOf(rpcUrl: string): string {
  */
 export function solanaWebsocket(
     config: ReconnectingWebSocketConfig<unknown>,
-    network: NetworkMachine['network']
+    network: NetworkMachine
 ) {
     return websocketConnection<unknown>(config, network);
 }

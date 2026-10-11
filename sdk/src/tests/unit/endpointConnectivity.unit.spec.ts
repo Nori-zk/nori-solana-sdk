@@ -1,7 +1,7 @@
-import { BehaviorSubject, filter, Subject } from 'rxjs';
+import { BehaviorSubject, defer, filter, of, Subject, throwError } from 'rxjs';
 import { httpConnection } from '../../rpc/connection/httpConnection.impl.js';
 import type { SolanaHealth } from '../../rpc/solana/solanaHttp.js';
-import { EXPECTED_GENESIS_HASH, FAST_TIMINGS, reach, sleep } from '../testUtils.js';
+import { EXPECTED_GENESIS_HASH, FAST_TIMINGS, statesDuring, waitForNode } from '../testUtils.js';
 
 type SolanaAnswer = 'answers' | 'down' | 'otherCluster';
 
@@ -24,24 +24,25 @@ function startSolanaEndpoints(
     const machine = httpConnection<SolanaHealth>({
         ...FAST_TIMINGS,
         urls: rpcUrls,
-        checkHealth: async (url) => {
-            checked.push(url);
-            const answer = answers.get(url);
-            if (answer === 'down') throw new Error(`${url} did not answer.`);
-            if (answer === 'otherCluster')
-                return {
-                    outcome: 'onOtherNetwork',
+        checkHealth: (url) =>
+            defer(() => {
+                checked.push(url);
+                const answer = answers.get(url);
+                if (answer === 'down') return throwError(() => new Error(`${url} did not answer.`));
+                if (answer === 'otherCluster')
+                    return of({
+                        outcome: 'onOtherNetwork' as const,
+                        url,
+                        found: 'devnet',
+                        expected: EXPECTED_GENESIS_HASH,
+                    });
+                return of({
+                    outcome: 'onExpectedNetwork' as const,
                     url,
-                    found: 'devnet',
-                    expected: EXPECTED_GENESIS_HASH,
-                };
-            return {
-                outcome: 'onExpectedNetwork',
-                url,
-                health: { slot: 1n },
-                checkedAt: 0,
-            };
-        },
+                    health: { slot: 1n },
+                    checkedAt: 0,
+                });
+            }),
         networkWentOffline$: network$.pipe(
             filter((status) => status === 'offline')
         ),
@@ -60,7 +61,7 @@ describe('HTTP connection machine, over Solana RPC endpoints', () => {
             ['https://first.test', 'https://second.test'],
             { 'https://first.test': 'down' }
         );
-        const ready = await reach(machine, 'ready');
+        const ready = await waitForNode(machine, 'ready');
         expect(ready.data).toEqual(
             expect.objectContaining({ url: 'https://second.test' })
         );
@@ -78,7 +79,7 @@ describe('HTTP connection machine, over Solana RPC endpoints', () => {
                 'https://only.test': 'otherCluster',
             }
         );
-        const wrong = await reach(machine, 'wrongNetwork');
+        const wrong = await waitForNode(machine, 'wrongNetwork');
         expect(wrong.data).toEqual({
             url: 'https://only.test',
             found: 'devnet',
@@ -86,7 +87,7 @@ describe('HTTP connection machine, over Solana RPC endpoints', () => {
             failedChecks: 1,
         });
         answers.set('https://only.test', 'answers');
-        await reach(machine, 'ready');
+        await waitForNode(machine, 'ready');
         close$.next();
     });
 
@@ -95,24 +96,25 @@ describe('HTTP connection machine, over Solana RPC endpoints', () => {
             'https://first.test',
             'https://second.test',
         ]);
-        await reach(machine, 'ready');
-        await sleep(350);
+        await waitForNode(machine, 'ready');
+        const states = await statesDuring(machine, 350);
         close$.next();
+        expect(new Set(states.map(({ node }) => node))).toEqual(new Set(['ready']));
         expect(new Set(checked)).toEqual(new Set(['https://first.test']));
     });
 
     test('a failed read checks at once, and going offline and back recovers', async () => {
         const { machine, answers, readFailed$, network$, close$ } =
             startSolanaEndpoints(['https://only.test']);
-        await reach(machine, 'ready');
+        await waitForNode(machine, 'ready');
         answers.set('https://only.test', 'down');
         readFailed$.next();
-        await reach(machine, 'unreachable');
+        await waitForNode(machine, 'unreachable');
         network$.next('offline');
-        await reach(machine, 'offline');
+        await waitForNode(machine, 'offline');
         answers.set('https://only.test', 'answers');
         network$.next('online');
-        await reach(machine, 'ready');
+        await waitForNode(machine, 'ready');
         close$.next();
     });
 });

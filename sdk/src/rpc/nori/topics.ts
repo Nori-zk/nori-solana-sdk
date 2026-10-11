@@ -78,7 +78,7 @@ const getTopic$ = (noriSocket: ReconnectingWebSocketSubject<unknown>, topic: Nor
  * @param noriSocket Nori's reconnecting websocket.
  * @returns Observable emitting bridge state updates.
  */
-export const getBridgeStateTopic$ = (noriSocket: ReconnectingWebSocketSubject<unknown>) =>
+export const bridgeStateTopic$ = (noriSocket: ReconnectingWebSocketSubject<unknown>) =>
     (
         getTopic$(noriSocket, 'state.bridge').pipe(
             // Suppress events when the state is 'unknown'
@@ -117,7 +117,7 @@ export const getBridgeStateTopic$ = (noriSocket: ReconnectingWebSocketSubject<un
  * @param noriSocket Nori's reconnecting websocket.
  * @returns Observable emitting transition timing updates.
  */
-export const getBridgeTimingsTopic$ = (noriSocket: ReconnectingWebSocketSubject<unknown>) =>
+export const bridgeTimingsTopic$ = (noriSocket: ReconnectingWebSocketSubject<unknown>) =>
     getTopic$(noriSocket, 'timings.notices.transition').pipe(
         filter(
             (message): message is Extract<
@@ -140,7 +140,7 @@ export const getBridgeTimingsTopic$ = (noriSocket: ReconnectingWebSocketSubject<
  * @param noriSocket Nori's reconnecting websocket.
  * @returns Observable emitting Ethereum finality state updates.
  */
-export const getEthStateTopic$ = (noriSocket: ReconnectingWebSocketSubject<unknown>) =>
+export const ethStateTopic$ = (noriSocket: ReconnectingWebSocketSubject<unknown>) =>
     (
         getTopic$(noriSocket, 'state.eth').pipe(
             // Suppress events when the state is 'unknown'
@@ -163,7 +163,7 @@ export const getEthStateTopic$ = (noriSocket: ReconnectingWebSocketSubject<unkno
  * @param noriSocket Nori's reconnecting websocket.
  * @returns Observable emitting each transition notice.
  */
-export const getTransitionNoticesTopic$ = (noriSocket: ReconnectingWebSocketSubject<unknown>) =>
+export const transitionNoticesTopic$ = (noriSocket: ReconnectingWebSocketSubject<unknown>) =>
     getTopic$(noriSocket, 'notices.transition.*') as Observable<AllTransitionNoticeMessages>;
 
 /**
@@ -173,5 +173,5 @@ export const getTransitionNoticesTopic$ = (noriSocket: ReconnectingWebSocketSubj
  * @param noriSocket Nori's reconnecting websocket.
  * @returns Observable emitting each system notice.
  */
-export const getSystemNoticesTopic$ = (noriSocket: ReconnectingWebSocketSubject<unknown>) =>
+export const systemNoticesTopic$ = (noriSocket: ReconnectingWebSocketSubject<unknown>) =>
     getTopic$(noriSocket, 'notices.system.*') as Observable<AllSystemNoticeMessages>;

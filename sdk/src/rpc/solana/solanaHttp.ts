@@ -4,13 +4,14 @@ import {
     isSolanaError,
     type RpcTransport,
 } from '@solana/kit';
-import { filter, Subject } from 'rxjs';
+import { filter, map, type Observable, of, Subject, switchMap } from 'rxjs';
 import { atNode } from '../../utils/machines.js';
-import { type HealthCheckTimings } from '../connection/healthCheckTimings.js';
+import { type HealthCheckTimings, resolveHealthCheckTimings } from '../connection/healthCheckTimings.js';
 import { type HttpConnectionState } from '../connection/httpConnection.js';
-import { httpConnection } from '../connection/httpConnection.impl.js';
+import { httpConnection, type HttpHealthCheck } from '../connection/httpConnection.impl.js';
 import { type NetworkMachine } from '../connection/network.impl.js';
 import { SolanaRpcTransportError } from './errors.js';
+import { solanaRpcRead$ } from './solanaRpcRead.js';
 
 /** The public Solana clusters, their public RPC endpoints and genesis hashes. */
 export const PUBLIC_SOLANA_CLUSTERS = {
@@ -55,8 +56,9 @@ export interface SolanaHealth {
 export type SolanaHttpConnectionState = HttpConnectionState<SolanaHealth>;
 
 /**
- * The default HTTP transport for `rpcUrl`, reporting a request that never
- * got a response as `SolanaRpcTransportError`.
+ * The default HTTP transport for `rpcUrl`, its requests failing with
+ * `SolanaRpcTransportError` when they get no response or take longer than
+ * `timeoutMs`.
  *
  * `fetch` rejects with a plain `TypeError` when a request never reaches the
  * node, and its message differs between runtimes, so it cannot be told
@@ -66,130 +68,127 @@ export type SolanaHttpConnectionState = HttpConnectionState<SolanaHealth>;
  * is a failed request. A request the caller aborted is passed on as is.
  *
  * @param rpcUrl HTTP(S) URL of the Solana RPC node.
- * @param onNoResponse Called for each request that got no response.
+ * @param timeoutMs How long a request may take before it counts as unanswered.
  * @returns The transport.
  */
-function createTransportReportingFailedRequests(
-    rpcUrl: string,
-    onNoResponse: () => void
-): RpcTransport {
+function createTransportNamingUnansweredRequests(rpcUrl: string, timeoutMs: number): RpcTransport {
     const transport = createDefaultRpcTransport({ url: rpcUrl });
     return async (config) => {
+        const timedOut = new AbortController();
+        const timer = setTimeout(
+            () => timedOut.abort(new Error(`The request to ${rpcUrl} took over ${timeoutMs} ms.`)),
+            timeoutMs
+        );
+        const forwardAbort = () => timedOut.abort(config.signal?.reason);
+        config.signal?.addEventListener('abort', forwardAbort);
         try {
-            return await transport(config);
+            return await transport({ ...config, signal: timedOut.signal });
         } catch (error) {
             if (isSolanaError(error) || config.signal?.aborted) throw error;
-            onNoResponse();
-            throw new SolanaRpcTransportError(
-                `The request to ${rpcUrl} got no response.`,
-                error
-            );
+            throw new SolanaRpcTransportError(`The request to ${rpcUrl} got no response.`, error);
+        } finally {
+            clearTimeout(timer);
+            config.signal?.removeEventListener('abort', forwardAbort);
         }
     };
 }
 
 /**
- * The Solana RPC for `rpcUrl`, reporting requests that got no response.
+ * The Solana RPC for `rpcUrl`, its requests failing with
+ * `SolanaRpcTransportError` when they get no response.
  *
  * @param rpcUrl HTTP(S) URL of the Solana RPC node.
- * @param onNoResponse Called for each request that got no response.
+ * @param timeoutMs How long a request may take before it counts as unanswered.
  * @returns The RPC.
  */
-function createSolanaRpc(rpcUrl: string, onNoResponse: () => void = () => undefined) {
-    return createSolanaRpcFromTransport(
-        createTransportReportingFailedRequests(rpcUrl, onNoResponse)
-    );
+function createSolanaRpc(rpcUrl: string, timeoutMs: number) {
+    return createSolanaRpcFromTransport(createTransportNamingUnansweredRequests(rpcUrl, timeoutMs));
 }
 
 /** The Solana RPC reads go through. */
 export type SolanaRpc = ReturnType<typeof createSolanaRpc>;
 
 /**
+ * A Solana RPC node's health check: its cluster by genesis hash, then, on
+ * the expected cluster, its latest finalized slot.
+ *
+ * @param rpc The node's RPC.
+ * @param expectedGenesisHash The cluster it should serve.
+ * @param url What is checked, for the result.
+ * @returns What the check found, once; errors when it cannot be reached.
+ */
+const clusterHealthCheck$ = (
+    rpc: SolanaRpc,
+    expectedGenesisHash: string,
+    url: string
+): Observable<Exclude<HttpHealthCheck<SolanaHealth>, { outcome: 'failed' }>> =>
+    solanaRpcRead$((abortSignal) => rpc.getGenesisHash().send({ abortSignal }), 'Failed to read the genesis hash.').pipe(
+        switchMap((genesisHash) =>
+            genesisHash !== expectedGenesisHash
+                ? of({ outcome: 'onOtherNetwork' as const, url, found: genesisHash, expected: expectedGenesisHash })
+                : solanaRpcRead$(
+                      (abortSignal) => rpc.getSlot({ commitment: 'finalized' }).send({ abortSignal }),
+                      'Failed to read the finalized slot.'
+                  ).pipe(
+                      map((slot) => ({
+                          outcome: 'onExpectedNetwork' as const,
+                          url,
+                          health: { slot },
+                          checkedAt: Date.now(),
+                      }))
+                  )
+        )
+    );
+
+/**
  * Opens the Solana RPC endpoints reads go through and runs their HTTP
  * connection machine. Solana wallets do not serve reads, so reads always go
  * through an RPC node: the cluster's public endpoint, unless the app gives
  * its own. The health check reads the genesis hash (the cluster) and the
- * latest finalized slot.
+ * latest finalized slot. Every request times out, so one to a node that
+ * stopped answering fails instead of hanging.
  *
  * @param options The cluster and endpoints, and timings.
  * @param network The running network machine the connection follows.
  * @returns
- *   - `connection`: the running HTTP connection machine.
- *   - `current()`: the RPC of the endpoint that last passed its check, if one has.
- *   - `reportReadFailed()`: tells the machine a request failed to reach the node; its
- *     own requests already do.
+ *   - `connection`: the running HTTP connection machine; `ready` names the URL that passed its check.
+ *   - `rpcOf(url)`: the RPC of one of its URLs.
+ *   - `reportReadFailed()`: tells the machine a request failed to reach the node.
  *   - `close()`: moves the machine to `closed`.
  */
-export function solanaHttp(
-    options: SolanaHttpOptions,
-    network: NetworkMachine['network']
-) {
+export function solanaHttp(options: SolanaHttpOptions, network: NetworkMachine) {
     const [rpcUrls, expectedGenesisHash] =
         'cluster' in options
             ? [
-                  options.rpcUrls ?? [
-                      PUBLIC_SOLANA_CLUSTERS[options.cluster].rpcUrl,
-                  ],
+                  options.rpcUrls ?? [PUBLIC_SOLANA_CLUSTERS[options.cluster].rpcUrl],
                   PUBLIC_SOLANA_CLUSTERS[options.cluster].genesisHash,
               ]
             : [options.rpcUrls, options.expectedGenesisHash];
-    if (rpcUrls.length === 0)
-        throw new RangeError('At least one Solana RPC URL is needed.');
+    if (rpcUrls.length === 0) throw new RangeError('At least one Solana RPC URL is needed.');
 
+    const { requestTimeoutMs } = resolveHealthCheckTimings(options);
     const readFailed$ = new Subject<void>();
     const close$ = new Subject<void>();
-    // A request that got no response tells the machine, which checks again.
-    const rpcs = new Map(
-        rpcUrls.map((rpcUrl) => [rpcUrl, createSolanaRpc(rpcUrl, () => readFailed$.next())])
-    );
+    const rpcs = new Map(rpcUrls.map((rpcUrl) => [rpcUrl, createSolanaRpc(rpcUrl, requestTimeoutMs)]));
+    const rpcOf = (url: string): SolanaRpc | undefined => rpcs.get(url);
 
     const connection = httpConnection<SolanaHealth>({
         ...options,
         urls: rpcUrls,
-        checkHealth: async (url) => {
-            const rpc = rpcs.get(url);
-            if (!rpc) throw new Error(`No Solana RPC for ${url}.`);
-            const genesisHash = await rpc.getGenesisHash().send();
-            if (genesisHash !== expectedGenesisHash) {
-                return {
-                    outcome: 'onOtherNetwork',
-                    url,
-                    found: genesisHash,
-                    expected: expectedGenesisHash,
-                };
-            }
-            const slot = await rpc.getSlot({ commitment: 'finalized' }).send();
-            return {
-                outcome: 'onExpectedNetwork',
-                url,
-                health: { slot },
-                checkedAt: Date.now(),
-            };
+        checkHealth: (url) => {
+            const rpc = rpcOf(url);
+            if (rpc === undefined) throw new Error(`No Solana RPC for ${url}.`);
+            return clusterHealthCheck$(rpc, expectedGenesisHash, url);
         },
-        networkWentOffline$: network.state$.pipe(
-            filter(atNode('offline'))
-        ),
-        networkCameOnline$: network.state$.pipe(
-            filter(atNode('online'))
-        ),
+        networkWentOffline$: network.state$.pipe(filter(atNode('offline'))),
+        networkCameOnline$: network.state$.pipe(filter(atNode('online'))),
         readFailed$,
         close$,
     });
 
-    // The RPC of the endpoint that last passed its check.
-    let currentRpc: SolanaRpc | undefined;
-    const subscription = connection.state$
-        .pipe(filter(atNode('ready')))
-        .subscribe((state) => {
-            currentRpc = rpcs.get(state.data.url);
-        });
-    connection.status$
-        .pipe(filter((status) => status !== 'running'))
-        .subscribe(() => subscription.unsubscribe());
-
     return {
         connection,
-        current: (): SolanaRpc | undefined => currentRpc,
+        rpcOf,
         reportReadFailed: () => readFailed$.next(),
         close: () => close$.next(),
     };

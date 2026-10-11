@@ -1,5 +1,5 @@
-import { filter, map, type Observable, share, switchMap, take, timer } from 'rxjs';
-import { dataOnEntry$ } from '../../utils/machines.js';
+import { filter, map, type Observable, switchMap, take, timer } from 'rxjs';
+import { dataOnEntry$, requestOnEntry$ } from '../../utils/machines.js';
 import {
     type HealthCheckTimings,
     resolveHealthCheckTimings,
@@ -51,20 +51,14 @@ export function createWebSocketConnectionMachine(
 
     // A failure while connecting, with the attempts that have failed in a
     // row including it; both outcome edges of `connecting` share it.
-    const connectFailure$ = dataOnEntry$<WebSocketConnectionState, 'connecting'>(
-        environment.connection$,
-        'connecting'
-    ).pipe(
-        switchMap(({ failedAttempts }) =>
-            environment.failed$.pipe(
-                take(1),
-                map(({ error }) => ({
-                    error,
-                    failedAttempts: failedAttempts + 1,
-                }))
-            )
-        ),
-        share()
+    const connectFailure$ = requestOnEntry$(environment.connection$, 'connecting', ({ failedAttempts }) =>
+        environment.failed$.pipe(
+            take(1),
+            map(({ error }) => ({
+                error,
+                failedAttempts: failedAttempts + 1,
+            }))
+        )
     );
 
     return WebSocketConnectionGraph.implement({

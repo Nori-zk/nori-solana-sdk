@@ -1,13 +1,13 @@
-import { JsonRpcProvider, Network } from 'ethers';
-import { filter, Subject, Subscription } from 'rxjs';
+import { FetchRequest, JsonRpcProvider, Network } from 'ethers';
+import { defer, filter, map, type Observable, of, Subject, Subscription, switchMap } from 'rxjs';
 import {
     type EthereumProvider,
     parseRpcUrl,
 } from '@nori-zk/ethereum-solana-bridge/iso-provider';
 import { atNode } from '../../utils/machines.js';
-import { type HealthCheckTimings } from '../connection/healthCheckTimings.js';
+import { type HealthCheckTimings, resolveHealthCheckTimings } from '../connection/healthCheckTimings.js';
 import { type HttpConnectionState } from '../connection/httpConnection.js';
-import { httpConnection } from '../connection/httpConnection.impl.js';
+import { httpConnection, type HttpHealthCheck } from '../connection/httpConnection.impl.js';
 import { type NetworkMachine } from '../connection/network.impl.js';
 
 /** The expected chain, the HTTP(S) RPC URL to read through, and timings. */
@@ -27,6 +27,41 @@ export interface EthereumHealth {
 export type EthereumHttpConnectionState = HttpConnectionState<EthereumHealth>;
 
 /**
+ * A chain's health check, through whatever serves its requests (an RPC URL
+ * or the wallet): its chain with `eth_chainId`, then, on the expected chain,
+ * its latest block with `eth_blockNumber`.
+ *
+ * @param request$ One request of the method, its result as a number.
+ * @param expectedChainId The chain it should be on.
+ * @param url What is checked, for the result.
+ * @returns What the check found, once; errors when it cannot be reached.
+ */
+export const chainHealthCheck$ = (
+    request$: (method: 'eth_chainId' | 'eth_blockNumber') => Observable<bigint>,
+    expectedChainId: bigint,
+    url: string
+): Observable<Exclude<HttpHealthCheck<EthereumHealth>, { outcome: 'failed' }>> =>
+    request$('eth_chainId').pipe(
+        switchMap((chainId) =>
+            chainId !== expectedChainId
+                ? of({
+                      outcome: 'onOtherNetwork' as const,
+                      url,
+                      found: chainId.toString(),
+                      expected: expectedChainId.toString(),
+                  })
+                : request$('eth_blockNumber').pipe(
+                      map((blockNumber) => ({
+                          outcome: 'onExpectedNetwork' as const,
+                          url,
+                          health: { blockNumber: Number(blockNumber) },
+                          checkedAt: Date.now(),
+                      }))
+                  )
+        )
+    );
+
+/**
  * Opens the Ethereum RPC URL reads go through and runs its HTTP connection
  * machine. The URL's chain is fixed, so ethers is given it up front and
  * never re-detects it; the health check reads it with a raw `eth_chainId`,
@@ -42,14 +77,18 @@ export type EthereumHttpConnectionState = HttpConnectionState<EthereumHealth>;
  */
 export function ethereumHttp(
     options: EthereumHttpOptions,
-    network: NetworkMachine['network']
+    network: NetworkMachine
 ) {
     const { expectedChainId, rpcUrl } = options;
-    const client: EthereumProvider = new JsonRpcProvider(parseRpcUrl(rpcUrl), undefined, {
+    // Every request times out, so one to a node that stopped answering fails
+    // and reports it instead of hanging.
+    const fetchRequest = new FetchRequest(parseRpcUrl(rpcUrl));
+    fetchRequest.timeout = resolveHealthCheckTimings(options).requestTimeoutMs;
+    const client: EthereumProvider = new JsonRpcProvider(fetchRequest, undefined, {
         staticNetwork: Network.from(expectedChainId),
     });
-    const request = (method: 'eth_chainId' | 'eth_blockNumber') =>
-        (client as JsonRpcProvider).send(method, []) as Promise<string>;
+    const request$ = (method: 'eth_chainId' | 'eth_blockNumber') =>
+        defer(() => (client as JsonRpcProvider).send(method, []) as Promise<string>).pipe(map(BigInt));
     const readFailed$ = new Subject<void>();
     const close$ = new Subject<void>();
     const subscriptions = new Subscription();
@@ -57,23 +96,7 @@ export function ethereumHttp(
     const connection = httpConnection<EthereumHealth>({
         ...options,
         urls: [rpcUrl],
-        checkHealth: async (url) => {
-            const chainId = BigInt(await request('eth_chainId'));
-            if (chainId !== expectedChainId)
-                return {
-                    outcome: 'onOtherNetwork',
-                    url,
-                    found: chainId.toString(),
-                    expected: expectedChainId.toString(),
-                };
-            const blockNumber = Number(BigInt(await request('eth_blockNumber')));
-            return {
-                outcome: 'onExpectedNetwork',
-                url,
-                health: { blockNumber },
-                checkedAt: Date.now(),
-            };
-        },
+        checkHealth: (url) => chainHealthCheck$(request$, expectedChainId, url),
         networkWentOffline$: network.state$.pipe(
             filter(atNode('offline'))
         ),

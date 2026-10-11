@@ -68,9 +68,7 @@ export type TokenError =
     | typeof TOKEN_ERROR__ZERO_MINT_AMOUNT
     | typeof TOKEN_ERROR__ZERO_SYNC_COMMITTEE_HASH;
 
-let tokenErrorMessages: Record<TokenError, string> | undefined;
-if (process.env['NODE_ENV'] !== 'production') {
-    tokenErrorMessages = {
+const tokenErrorMessages: Record<TokenError, string> = {
         [TOKEN_ERROR__COMMITMENT_MISMATCH]: `Recipient pubkey does not hash to the deposit commitment`,
         [TOKEN_ERROR__DECODING_PROOF_FAILED]: `Failed to decode proof bytes`,
         [TOKEN_ERROR__E_T_H_PROOF_QUEUE_ADDRESS_MISMATCH]: `ETH proof queue address mismatch`,
@@ -89,14 +87,9 @@ if (process.env['NODE_ENV'] !== 'production') {
         [TOKEN_ERROR__ZERO_MINT_AMOUNT]: `No new amount to mint: locked_so_far equals minted_so_far`,
         [TOKEN_ERROR__ZERO_SYNC_COMMITTEE_HASH]: `Next sync committee hash is zero`,
     };
-}
 
 export function getTokenErrorMessage(code: TokenError): string {
-    if (process.env['NODE_ENV'] !== 'production') {
-        return (tokenErrorMessages as Record<TokenError, string>)[code];
-    }
-
-    return 'Error message not available in production bundles.';
+    return tokenErrorMessages[code];
 }
 
 export function isTokenError<TProgramErrorCode extends TokenError>(

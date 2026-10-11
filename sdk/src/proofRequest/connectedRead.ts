@@ -4,7 +4,6 @@ import {
     defer,
     distinctUntilChanged,
     filter,
-    from,
     map,
     merge,
     type Observable,
@@ -14,18 +13,29 @@ import {
     switchMap,
     take,
     takeUntil,
+    throwError,
 } from 'rxjs';
 import { type EthereumProvider } from '@nori-zk/ethereum-solana-bridge/iso-provider';
+import { type GraphState, type StartedMachine } from '../utils/machines.js';
 import { messageOf } from '../utils/messageOf.js';
-import { ConnectionNotReadyError } from '../rpc/connection/connectionNotReady.js';
+import {
+    ConnectionNotReadyError,
+    type TransportName,
+    type TransportState,
+} from '../rpc/connection/connectionNotReady.js';
 import {
     type Ethereum,
     ethereumCallsUsable$,
-    forCalls,
-    forLogs,
+    forCalls$,
+    forLogs$,
+    forSolana$,
+    forTransport$,
+    type RequestTransport,
     type Solana,
+    solanaCallsUsable$,
+    solanaWalletUsable$,
+    transportUsable$,
 } from '../rpc/connection/connections.js';
-import { SolanaRpcTransportError } from '../rpc/solana/errors.js';
 import { type SolanaRpc } from '../rpc/solana/solanaHttp.js';
 
 /**
@@ -44,68 +54,150 @@ export interface ProofRequestConnections {
 /** Which of the two chains. */
 export type ConnectionName = keyof ProofRequestConnections;
 
-/** The clients one read goes through. */
+/** One Ethereum transport, by name: `ethereum.http`, `ethereum.websocket`, `ethereum.wallet`. */
+export type ChainTransportName = `ethereum.${RequestTransport}`;
+
+/** What a read or a send needs: a chain, one Ethereum transport, or the Solana wallet. */
+export type ReadNeed = ConnectionName | ChainTransportName | 'solana.wallet';
+
+/**
+ * Runs one read on Ethereum, through the transports of its order; the read
+ * is given the transport's provider. Unsubscribing cancels it.
+ */
+export type ChainRead = <T>(read: (provider: EthereumProvider) => Observable<T>) => Observable<T>;
+
+/**
+ * Runs one read on Solana, through its RPC; the read is given the RPC.
+ * Unsubscribing cancels it.
+ */
+export type SolanaRead = <T>(read: (rpc: SolanaRpc) => Observable<T>) => Observable<T>;
+
+/**
+ * What one read goes through: a runner per chain, and one for the Ethereum
+ * transport the read needs. Ethereum's runs its part of the read on the
+ * first ready transport in its order and moves on to the next when one
+ * fails to reach its node; Solana's runs its part on its RPC. Either way a
+ * failure is told to the transport of the chain it happened on.
+ * `transport` runs it on the transport `needs` names, and only there.
+ */
 export interface ConnectedReadClients {
-    provider: EthereumProvider;
-    rpc: SolanaRpc;
+    ethereum: ChainRead;
+    solana: SolanaRead;
+    transport: ChainRead;
 }
 
 /** How one read through both chains ended. */
 export type ConnectedRead<T> =
     | { outcome: 'succeeded'; value: T }
-    | { outcome: 'connectionLost'; waitingOn: ConnectionName[] }
+    | { outcome: 'connectionLost'; waitingOn: ReadNeed[] }
     | { outcome: 'failedOnHealthyConnection'; error: string }
     | { outcome: 'failed'; error: string };
 
+/** Both chains, the ones a read needs unless it says otherwise. */
+const BOTH_CHAINS: ReadNeed[] = ['ethereum', 'solana'];
+
 /**
- * The chains that cannot serve a read, each time either changes: Ethereum
- * while no transport in its calls order is usable, Solana while its http
- * is not `ready`.
+ * Whether a need names one Ethereum transport.
+ *
+ * @param need What a read needs.
+ * @returns `true` for an Ethereum transport.
+ */
+const isTransportNeed = (need: ReadNeed): need is ChainTransportName => need.startsWith('ethereum.');
+
+/**
+ * A transport need's transport.
+ *
+ * @param need The transport, by name.
+ * @returns Its kind.
+ */
+const transportOf = (need: ChainTransportName) => need.split('.')[1] as RequestTransport;
+
+/**
+ * The runners a read goes through: Ethereum in its calls or logs order,
+ * Solana through its RPC, and the Ethereum transport `needs` names. Without
+ * one, `transport` errors with `ConnectionNotReadyError`.
+ *
+ * @param connections The two chains.
+ * @param kind Whether Ethereum's calls or logs order applies.
+ * @param needs What the read needs.
+ * @returns The runner per chain, and the transport's.
+ */
+export function connectedReadClientsOf(
+    connections: ProofRequestConnections,
+    kind: 'calls' | 'logs' = 'calls',
+    needs: ReadNeed[] = BOTH_CHAINS
+): ConnectedReadClients {
+    const through = kind === 'logs' ? forLogs$ : forCalls$;
+    const transportNeed = needs.find(isTransportNeed);
+    return {
+        ethereum: (read) => through(connections.ethereum, read),
+        solana: (read) => forSolana$(connections.solana, read),
+        transport: (read) =>
+            transportNeed === undefined
+                ? throwError(() => new ConnectionNotReadyError([]))
+                : forTransport$(connections.ethereum, transportOf(transportNeed), read),
+    };
+}
+
+/**
+ * Whether a need can serve a read, as it changes: Ethereum while a
+ * transport in its calls order is usable, Solana while its http is, an
+ * Ethereum transport while it is.
+ *
+ * @param connections The two chains.
+ * @param need What the read needs.
+ * @param whileChecking Count a transport re-checking itself as usable.
+ * @returns `true` while it can.
+ */
+function needUsable$(connections: ProofRequestConnections, need: ReadNeed, whileChecking: boolean) {
+    if (need === 'ethereum') return ethereumCallsUsable$(connections.ethereum, whileChecking);
+    if (need === 'solana') return solanaCallsUsable$(connections.solana, whileChecking);
+    if (need === 'solana.wallet') return solanaWalletUsable$(connections.solana);
+    return transportUsable$(connections.ethereum, transportOf(need), whileChecking);
+}
+
+/**
+ * The needs that cannot serve a read, each time one changes.
  *
  * @param connections The two chains.
  * @param whileChecking Count a transport re-checking itself as able: what a
  *   failed request did is decided once its check settles.
- * @returns The names of the chains that cannot serve a read, in a fixed order.
+ * @param needs What the read needs.
+ * @returns The needs that cannot serve a read, in the order of `needs`.
  */
 function notReady$(
     connections: ProofRequestConnections,
-    whileChecking = false
-): Observable<ConnectionName[]> {
-    return combineLatest([
-        ethereumCallsUsable$(connections.ethereum, whileChecking),
-        connections.solana.http.connection.state$,
-    ]).pipe(
-        map(([ethereumUsable, solana]) => {
-            const names: ConnectionName[] = [];
-            if (!ethereumUsable) names.push('ethereum');
-            if (solana.node !== 'ready' && !(whileChecking && solana.node === 'checking'))
-                names.push('solana');
-            return names;
-        })
+    whileChecking = false,
+    needs: ReadNeed[] = BOTH_CHAINS
+): Observable<ReadNeed[]> {
+    return combineLatest(needs.map((need) => needUsable$(connections, need, whileChecking))).pipe(
+        map((usable) => needs.filter((_need, i) => !usable[i]))
     );
 }
 
 /**
- * Whether two lists of connection names are the same.
+ * Whether two lists of needs are the same.
  *
- * @param a A list of names.
- * @param b Another list of names.
- * @returns `true` when they hold the same names in the same order.
+ * @param a A list of needs.
+ * @param b Another list of needs.
+ * @returns `true` when they hold the same needs in the same order.
  */
-function sameNames(a: ConnectionName[], b: ConnectionName[]): boolean {
+function sameNames(a: ReadNeed[], b: ReadNeed[]): boolean {
     return a.length === b.length && a.every((name, i) => name === b[i]);
 }
 
 /**
- * Emits once both chains can serve a read: at once if they already can.
+ * Emits once the needs of a read can serve it: at once if they already can.
  *
  * @param connections The two chains.
- * @returns A single emission when both are ready.
+ * @param needs What the read needs (default: both chains).
+ * @returns A single emission when they are ready.
  */
 export function bothReady$(
-    connections: ProofRequestConnections
+    connections: ProofRequestConnections,
+    needs: ReadNeed[] = BOTH_CHAINS
 ): Observable<void> {
-    return notReady$(connections).pipe(
+    return notReady$(connections, false, needs).pipe(
         filter((names) => names.length === 0),
         take(1),
         map((): void => undefined)
@@ -113,18 +205,38 @@ export function bothReady$(
 }
 
 /**
- * The chains a waiting machine waits on, each time the set changes while
+ * Emits once some needs of a read cannot serve it, naming them: at once if
+ * some already cannot.
+ *
+ * @param connections The two chains.
+ * @param needs What the read needs (default: both chains).
+ * @returns The needs that cannot serve a read, once.
+ */
+export function needsNotReady$(
+    connections: ProofRequestConnections,
+    needs: ReadNeed[] = BOTH_CHAINS
+): Observable<ReadNeed[]> {
+    return notReady$(connections, false, needs).pipe(
+        filter((names) => names.length > 0),
+        take(1)
+    );
+}
+
+/**
+ * The needs a waiting machine waits on, each time the set changes while
  * some still cannot serve a read. The set the machine entered with is not
  * repeated: the first emission, the set as it stands when subscribed, is
  * skipped.
  *
  * @param connections The two chains.
- * @returns The names of the chains that cannot serve a read, when that set changes.
+ * @param needs What the read needs (default: both chains).
+ * @returns The needs that cannot serve a read, when that set changes.
  */
 export function waitingOnChanged$(
-    connections: ProofRequestConnections
-): Observable<ConnectionName[]> {
-    return notReady$(connections).pipe(
+    connections: ProofRequestConnections,
+    needs: ReadNeed[] = BOTH_CHAINS
+): Observable<ReadNeed[]> {
+    return notReady$(connections, false, needs).pipe(
         distinctUntilChanged(sameNames),
         skip(1),
         filter((names) => names.length > 0)
@@ -132,123 +244,108 @@ export function waitingOnChanged$(
 }
 
 /**
- * Decides what a Solana transport failure was, once its http has re-checked
- * itself (its transport already told it): straight back to `ready` means
- * the http is fine and the read itself failed; anywhere else means it was
- * lost.
+ * The machine of a transport, by its name.
  *
  * @param connections The two chains.
- * @param error The read's error.
- * @returns The outcome, once the http has settled.
+ * @param transport The transport's name.
+ * @returns Its machine, or `undefined` when it is not configured.
  */
-function outcomeAfterSolanaRecheck$(
+function machineOf(
     connections: ProofRequestConnections,
-    error: unknown
-): Observable<ConnectedRead<never>> {
-    return connections.solana.http.connection.state$.pipe(
-        filter(({ node }) => node !== 'checking'),
-        take(1),
-        switchMap(({ node }) =>
-            node === 'ready'
-                ? of({
-                      outcome: 'failedOnHealthyConnection' as const,
-                      error: messageOf(error),
-                  })
-                : connectionLost$(connections)
-        )
-    );
+    { transport }: TransportState
+): StartedMachine<GraphState> | undefined {
+    if (transport === 'solana.http') return connections.solana.http.connection as StartedMachine<GraphState>;
+    const [chainName, kind] = transport.split('.') as [string, RequestTransport];
+    if (chainName !== 'ethereum') return undefined;
+    return connections.ethereum[kind].connection as StartedMachine<GraphState> | undefined;
 }
 
 /**
- * Decides what it was when every Ethereum transport tried failed to reach
+ * Decides what it was when every transport tried on a chain failed to reach
  * its node, once those transports (each already told) have re-checked
- * themselves: one usable again means the read itself failed; none means the
- * connection was lost.
+ * themselves: every need usable again means the read itself failed;
+ * otherwise the connection was lost.
  *
  * @param connections The two chains.
  * @param error The failure, listing the transports that got no response.
+ * @param needs What the read needs.
  * @returns The outcome, once they have settled.
  */
-function outcomeAfterEthereumRecheck$(
+function outcomeAfterRecheck$(
     connections: ProofRequestConnections,
-    error: ConnectionNotReadyError
+    error: ConnectionNotReadyError,
+    needs: ReadNeed[]
 ): Observable<ConnectedRead<never>> {
-    const { ethereum } = connections;
     const machines = error.notReady
         .filter(({ state }) => state.node === 'noResponse')
-        .map(({ transport }) =>
-            transport === 'ethereum.http'
-                ? ethereum.http.connection
-                : transport === 'ethereum.websocket'
-                  ? ethereum.websocket.connection
-                  : ethereum.wallet.connection
-        )
+        .map((transportState) => machineOf(connections, transportState))
         .filter((machine): machine is NonNullable<typeof machine> => machine !== undefined)
         .map((machine) =>
-            (machine.state$ as Observable<{ node: string }>).pipe(
+            machine.state$.pipe(
                 filter(({ node }) => node !== 'checking'),
                 take(1)
             )
         );
     return combineLatest(machines).pipe(
         take(1),
-        switchMap(() => ethereumCallsUsable$(ethereum).pipe(take(1))),
-        switchMap((usable) =>
-            usable
+        switchMap(() => notReady$(connections, false, needs).pipe(take(1))),
+        switchMap((waitingOn) =>
+            waitingOn.length === 0
                 ? of({
                       outcome: 'failedOnHealthyConnection' as const,
                       error: messageOf(error),
                   })
-                : connectionLost$(connections)
+                : of({ outcome: 'connectionLost' as const, waitingOn })
         )
     );
 }
 
 /**
- * Reports the chains lost, as they stand.
+ * The need a transport that was not ready stands for: the transport itself
+ * when the read names it, else its chain.
  *
- * @param connections The two chains.
- * @returns A single `connectionLost` naming the chains that cannot serve a read.
+ * @param transport The transport, by name.
+ * @param needs What the read needs.
+ * @returns The need.
  */
-function connectionLost$(
-    connections: ProofRequestConnections
-): Observable<ConnectedRead<never>> {
-    return notReady$(connections).pipe(
-        take(1),
-        map((waitingOn) => ({ outcome: 'connectionLost' as const, waitingOn }))
-    );
-}
+const needOf = (transport: TransportName, needs: ReadNeed[]): ReadNeed =>
+    needs.includes(transport as ReadNeed) ? (transport as ReadNeed) : (transport.split('.')[0] as ConnectionName);
 
 /**
- * Runs one read through both chains and reports how it ended:
+ * Runs one read and reports how it ended:
  *
- * - `connectionLost`, naming the chains that cannot serve a read, when one
+ * - `connectionLost`, naming the needs that cannot serve a read, when one
  *   cannot to begin with, stops being able to during the read, or every
- *   Ethereum transport in the order failed to reach its node;
- * - `failedOnHealthyConnection` when the read fails to reach Solana's node
- *   and its http, re-checked, is fine: the read itself is the problem;
+ *   transport tried failed to reach its node and stays down;
+ * - `failedOnHealthyConnection` when every transport tried failed to reach
+ *   its node, and, re-checked, they are fine: the read itself is the
+ *   problem;
  * - `failed` for any other error;
  * - `succeeded` with the read's value otherwise.
  *
- * Ethereum goes through `forCalls` (or `forLogs`), which runs the read on
- * the next transport in the caller's order when one fails to reach its
- * node; Solana goes through its http, whose transport tells its machine.
+ * Ethereum's part of the read goes through its runner (`forCalls$`, or
+ * `forLogs$` for its logs), which runs it on the next transport in its
+ * order when one fails to reach its node; Solana's goes through its RPC
+ * (`forSolana$`); a part that needs one Ethereum transport goes through
+ * `transport`.
  *
  * @param connections The two chains.
- * @param read The read, given the clients to read through.
+ * @param read The read, given the runners.
  * @param kind Whether Ethereum's calls or logs order applies.
+ * @param needs What the read needs (default: both chains).
  * @returns The outcome, once.
  */
 export function readThroughConnections$<T>(
     connections: ProofRequestConnections,
-    read: (clients: ConnectedReadClients) => Promise<T>,
-    kind: 'calls' | 'logs' = 'calls'
+    read: (clients: ConnectedReadClients) => Observable<T>,
+    kind: 'calls' | 'logs' = 'calls',
+    needs: ReadNeed[] = BOTH_CHAINS
 ): Observable<ConnectedRead<T>> {
     const readWhileReady$ = defer((): Observable<ConnectedRead<T>> => {
         // A failed request sends its transport to re-check itself, which is
         // not a loss: what the failure was is decided once the read settles.
         const readSettled$ = new Subject<void>();
-        const lostWhileReading$ = notReady$(connections, true).pipe(
+        const lostWhileReading$ = notReady$(connections, true, needs).pipe(
             filter((names) => names.length > 0),
             take(1),
             map((waitingOn) => ({
@@ -257,15 +354,8 @@ export function readThroughConnections$<T>(
             })),
             takeUntil(readSettled$)
         );
-        const { ethereum, solana } = connections;
-        const through = kind === 'logs' ? forLogs : forCalls;
-        const result$ = defer(() =>
-            from(
-                solana.http
-                    .ready()
-                    .then((rpc) => through(ethereum, (provider) => read({ provider, rpc })))
-            )
-        ).pipe(
+        const result$ = defer(() => read(connectedReadClientsOf(connections, kind, needs))).pipe(
+            take(1),
             map((value) => ({ outcome: 'succeeded' as const, value })),
             catchError((error: unknown) => {
                 readSettled$.next();
@@ -273,20 +363,12 @@ export function readThroughConnections$<T>(
                     error instanceof ConnectionNotReadyError &&
                     error.notReady.some(({ state }) => state.node === 'noResponse')
                 )
-                    return outcomeAfterEthereumRecheck$(connections, error);
+                    return outcomeAfterRecheck$(connections, error, needs);
                 if (error instanceof ConnectionNotReadyError)
                     return of({
                         outcome: 'connectionLost' as const,
-                        waitingOn: [
-                            ...new Set(
-                                error.notReady.map(
-                                    ({ transport }) => transport.split('.')[0] as ConnectionName
-                                )
-                            ),
-                        ],
+                        waitingOn: [...new Set(error.notReady.map(({ transport }) => needOf(transport, needs)))],
                     });
-                if (error instanceof SolanaRpcTransportError)
-                    return outcomeAfterSolanaRecheck$(connections, error);
                 return of({
                     outcome: 'failed' as const,
                     error: messageOf(error),
@@ -296,7 +378,7 @@ export function readThroughConnections$<T>(
         return merge(lostWhileReading$, result$).pipe(take(1));
     });
 
-    return notReady$(connections).pipe(
+    return notReady$(connections, false, needs).pipe(
         take(1),
         switchMap((waitingOn) =>
             waitingOn.length === 0

@@ -16,9 +16,9 @@ import {
     getFinalityTimeRemainingSec,
 } from '../rpc/nori/commitTimes.js';
 import {
-    getBridgeStateTopic$,
-    getBridgeTimingsTopic$,
-    getEthStateTopic$,
+    bridgeStateTopic$,
+    bridgeTimingsTopic$,
+    ethStateTopic$,
 } from '../rpc/nori/topics.js';
 import {
     UnprocessedProofRequestStateGraph,
@@ -443,9 +443,9 @@ export function createUnprocessedProofRequestStateMachine(
         proofRequestScopedBridgeObservation$: createProofRequestScopedBridgeObservation$(
             proofRequestBlockNumber,
             {
-                ethStateTopic$: getEthStateTopic$(nori.socket),
-                bridgeStateTopic$: getBridgeStateTopic$(nori.socket),
-                bridgeTimingsTopic$: getBridgeTimingsTopic$(nori.socket),
+                ethStateTopic$: ethStateTopic$(nori.socket),
+                bridgeStateTopic$: bridgeStateTopic$(nori.socket),
+                bridgeTimingsTopic$: bridgeTimingsTopic$(nori.socket),
             }
         ),
     };

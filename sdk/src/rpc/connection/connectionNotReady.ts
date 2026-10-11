@@ -1,3 +1,5 @@
+import { type GraphState } from '../../utils/machines.js';
+
 /** A transport, by chain and kind. */
 export type TransportName =
     | 'ethereum.http'
@@ -5,12 +7,13 @@ export type TransportName =
     | 'ethereum.wallet'
     | 'solana.http'
     | 'solana.websocket'
+    | 'solana.wallet'
     | 'nori.websocket';
 
 /** A transport's state when it was asked for: a node of its machine, or not configured. */
 export interface TransportState {
     transport: TransportName;
-    state: { node: string; data: unknown };
+    state: GraphState;
 }
 
 /**

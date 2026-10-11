@@ -2,8 +2,8 @@ import { type Eip1193Provider } from 'ethers';
 import { Observable } from 'rxjs';
 
 /**
- * An EIP-1193 provider that may emit the standard `connect`, `disconnect`
- * and `chainChanged` events, e.g. MetaMask's.
+ * An EIP-1193 provider that may emit the standard `connect`, `disconnect`,
+ * `chainChanged` and `accountsChanged` events, e.g. MetaMask's.
  */
 export type Eip1193EventProvider = Eip1193Provider & {
     on?(event: string, listener: (...args: unknown[]) => void): unknown;
@@ -21,12 +21,12 @@ export const USER_REJECTED_REQUEST = 4001;
  * provider without event support never emits.
  *
  * @param provider The wallet provider.
- * @param event `chainChanged`, `connect` or `disconnect`.
+ * @param event `chainChanged`, `connect`, `disconnect` or `accountsChanged`.
  * @returns Each event's first argument, as it arrives.
  */
 export function eip1193Event$(
     provider: Eip1193EventProvider,
-    event: 'chainChanged' | 'connect' | 'disconnect'
+    event: 'chainChanged' | 'connect' | 'disconnect' | 'accountsChanged'
 ): Observable<unknown> {
     return new Observable<unknown>((subscriber) => {
         const listener = (value: unknown) => subscriber.next(value);

@@ -1,24 +1,18 @@
-import {
-    type GetAccountInfoApi,
-    type GetMultipleAccountsApi,
-    type Rpc,
-} from '@solana/kit';
-import { type EthereumProvider } from '@nori-zk/ethereum-solana-bridge/iso-provider';
-import { TOKEN_PROGRAM_ADDRESS } from '../program/programs/token.js';
-import { classifyProofRequests } from './classifyProofRequests.js';
+import { EMPTY, expand, last, map, type Observable, of, switchMap } from 'rxjs';
+import { proofRequestSnapshots$ } from './proofRequestSnapshots.js';
+import { type ConnectedReadClients } from './connectedRead.js';
 import {
     type ProofRequestStateSnapshot,
     type ProofRequestStateSnapshotRequest,
 } from './getProofRequestStateSnapshot.js';
-import { EthRpcTransportError } from '../rpc/eth/errors.js';
-import { type ProofRequest } from '../rpc/eth/fetchProofRequest.js';
+import { blockNumber$ } from '../rpc/eth/blockNumber.js';
+import { type ProofRequest } from '../rpc/eth/proofRequest.js';
 import {
-    fetchProofRequestsByTarget,
+    proofRequestsByTarget$,
     type ProofRequestHistoryCursor,
     type ProofRequestsByTargetQuery,
-} from '../rpc/eth/fetchProofRequestsByTarget.js';
-import { fetchBridgeState } from '../rpc/solana/fetchBridgeState.js';
-import { withBackoff } from '../utils/withBackoff.js';
+} from '../rpc/eth/proofRequestsByTarget.js';
+import { bridgeState$ } from '../rpc/solana/bridgeState.js';
 
 /** The addresses a history read needs: no single enqueuing transaction. */
 export type ProofRequestHistoryRequest = Omit<
@@ -34,7 +28,7 @@ export type ProofRequestHistoryAddresses = Pick<
 
 /** A request a submitting address enqueued, with where it is now. */
 export interface ProofRequestHistoryEntry extends ProofRequest {
-    /** `unprocessed`, or `proofAvailable` with the committed batch covering it (what `fetchProofRequestWitness` takes). */
+    /** `unprocessed`, or `proofAvailable` with the committed batch covering it (what `createProofRequestWitnessMachine` takes). */
     snapshot: ProofRequestStateSnapshot;
 }
 
@@ -56,47 +50,63 @@ export interface ProofRequestCounts {
 const COUNTING_PAGE_SIZE = 1000;
 
 /**
- * Reads one page of a submitting address's proof requests from Ethereum and
- * classifies them against one read of the bridge state on Solana.
+ * The highest block a read searches: `toBlock`, or Ethereum's latest block
+ * when it is omitted.
  *
- * @param provider The Ethereum provider.
- * @param rpc The Solana RPC.
+ * @param clients The runner per chain.
+ * @param toBlock The highest block, if given.
+ * @returns The block's number, once.
+ */
+const toBlockOf$ = (clients: ConnectedReadClients, toBlock: number | undefined): Observable<number> =>
+    toBlock !== undefined ? of(toBlock) : clients.ethereum((provider) => blockNumber$(provider, 'latest'));
+
+/**
+ * Reads one page of a submitting address's proof requests from Ethereum and
+ * places them against one read of the bridge state on Solana.
+ *
+ * @param clients The runner per chain: Ethereum reads the page, Solana places it.
  * @param request The queue and program addresses.
  * @param query The submitting address, block range, order, page size and cursor.
- * @returns The page's entries, its continuation cursor, and whether the range is exhausted.
- * @throws EthRpcTransportError When an Ethereum read still fails after its retries.
- * @throws SolanaRpcTransportError When a Solana read still fails after its retries.
+ * @returns The page's entries, its continuation cursor, and whether the range is exhausted, once.
+ *   Errors with `ConnectionNotReadyError` when a chain could not serve its part.
  */
-export async function fetchProofRequestHistoryPage(
-    provider: EthereumProvider,
-    rpc: Rpc<GetAccountInfoApi & GetMultipleAccountsApi>,
+export function fetchProofRequestHistoryPage$(
+    clients: ConnectedReadClients,
     request: ProofRequestHistoryRequest,
     query: ProofRequestsByTargetQuery
-): Promise<ProofRequestHistoryPage> {
-    const page = await fetchProofRequestsByTarget(
-        provider,
-        request.proofQueueAddress,
-        query
+): Observable<ProofRequestHistoryPage> {
+    return toBlockOf$(clients, query.toBlock).pipe(
+        switchMap((toBlock) =>
+            clients.ethereum((provider) =>
+                proofRequestsByTarget$(provider, request.proofQueueAddress, { ...query, toBlock })
+            )
+        ),
+        switchMap((page) =>
+            page.requests.length === 0
+                ? of({ entries: [], cursor: page.cursor, done: page.done })
+                : clients
+                      .solana((rpc) =>
+                          proofRequestSnapshots$(
+                              rpc,
+                              page.requests.map((proofRequest) => ({
+                                  requestId: proofRequest.requestId,
+                                  requestBlockNumber: BigInt(proofRequest.blockNumber),
+                              })),
+                              request.programAddress
+                          )
+                      )
+                      .pipe(
+                          map((snapshots) => ({
+                              entries: page.requests.map((proofRequest, i) => ({
+                                  ...proofRequest,
+                                  snapshot: snapshots[i],
+                              })),
+                              cursor: page.cursor,
+                              done: page.done,
+                          }))
+                      )
+        )
     );
-    if (page.requests.length === 0) {
-        return { entries: [], cursor: page.cursor, done: page.done };
-    }
-    const snapshots = await classifyProofRequests(
-        rpc,
-        page.requests.map((proofRequest) => ({
-            requestId: proofRequest.requestId,
-            requestBlockNumber: BigInt(proofRequest.blockNumber),
-        })),
-        request.programAddress
-    );
-    return {
-        entries: page.requests.map((proofRequest, i) => ({
-            ...proofRequest,
-            snapshot: snapshots[i],
-        })),
-        cursor: page.cursor,
-        done: page.done,
-    };
 }
 
 /**
@@ -104,66 +114,57 @@ export async function fetchProofRequestHistoryPage(
  * many have a proof available: the queue drains in order, so every id below
  * the bridge's queue cursor is proven.
  *
- * @param provider The Ethereum provider.
- * @param rpc The Solana RPC.
+ * @param clients The runner per chain: Ethereum reads the requests, Solana the bridge's queue cursor.
  * @param request The queue and program addresses.
  * @param query The submitting address and block range.
- * @returns The total, proven and unprocessed counts.
- * @throws EthRpcTransportError When an Ethereum read still fails after its retries.
- * @throws SolanaRpcTransportError When a Solana read still fails after its retries.
+ * @returns The total, proven and unprocessed counts, once.
+ *   Errors with `ConnectionNotReadyError` when a chain could not serve its part.
  */
-export async function fetchProofRequestCountsByTarget(
-    provider: EthereumProvider,
-    rpc: Rpc<GetAccountInfoApi & GetMultipleAccountsApi>,
+export function fetchProofRequestCountsByTarget$(
+    clients: ConnectedReadClients,
     request: ProofRequestHistoryRequest,
-    query: Pick<
-        ProofRequestsByTargetQuery,
-        'target' | 'fromBlock' | 'toBlock' | 'maxBlockRangePerQuery'
-    >
-): Promise<ProofRequestCounts> {
-    // Fixed up front so every page reads the same range.
-    const toBlock =
-        query.toBlock ??
-        (await withBackoff(() => provider.getBlockNumber()).catch(
-            (error: unknown) => {
-                throw new EthRpcTransportError(
-                    'Failed to read the latest block number.',
-                    error
-                );
-            }
-        ));
+    query: Pick<ProofRequestsByTargetQuery, 'target' | 'fromBlock' | 'toBlock' | 'maxBlockRangePerQuery'>
+): Observable<ProofRequestCounts> {
+    /** One page after `after`, its ids added to those read so far. */
+    const page$ = (toBlock: number, requestIds: bigint[], after: ProofRequestHistoryCursor | undefined) =>
+        clients
+            .ethereum((provider) =>
+                proofRequestsByTarget$(provider, request.proofQueueAddress, {
+                    ...query,
+                    toBlock,
+                    order: 'asc',
+                    pageSize: COUNTING_PAGE_SIZE,
+                    after,
+                })
+            )
+            .pipe(
+                map((page) => ({
+                    page,
+                    requestIds: [...requestIds, ...page.requests.map((proofRequest) => proofRequest.requestId)],
+                }))
+            );
 
-    const requestIds: bigint[] = [];
-    let after: ProofRequestHistoryCursor | undefined;
-    for (;;) {
-        const page = await fetchProofRequestsByTarget(
-            provider,
-            request.proofQueueAddress,
-            {
-                ...query,
-                toBlock,
-                order: 'asc',
-                pageSize: COUNTING_PAGE_SIZE,
-                after,
-            }
-        );
-        requestIds.push(
-            ...page.requests.map((proofRequest) => proofRequest.requestId)
-        );
-        after = page.cursor;
-        if (page.done) break;
-    }
-
-    const { queueCursor } = await fetchBridgeState(
-        rpc,
-        request.programAddress ?? TOKEN_PROGRAM_ADDRESS
+    // The block range is fixed up front, so every page reads the same range.
+    return toBlockOf$(clients, query.toBlock).pipe(
+        switchMap((toBlock) =>
+            page$(toBlock, [], undefined).pipe(
+                expand(({ page, requestIds }) => (page.done ? EMPTY : page$(toBlock, requestIds, page.cursor))),
+                last()
+            )
+        ),
+        switchMap(({ requestIds }) =>
+            clients
+                .solana((rpc) => bridgeState$(rpc, request.programAddress))
+                .pipe(
+                    map(({ queueCursor }) => {
+                        const proofAvailable = requestIds.filter((requestId) => requestId < queueCursor).length;
+                        return {
+                            total: requestIds.length,
+                            proofAvailable,
+                            unprocessed: requestIds.length - proofAvailable,
+                        };
+                    })
+                )
+        )
     );
-    const proofAvailable = requestIds.filter(
-        (requestId) => requestId < queueCursor
-    ).length;
-    return {
-        total: requestIds.length,
-        proofAvailable,
-        unprocessed: requestIds.length - proofAvailable,
-    };
 }

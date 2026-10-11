@@ -1,12 +1,11 @@
 import { type Nori } from '../rpc/connection/connections.js';
-import { startNoriBridgeInfraTransitions as startNoriBridgeInfraTransitionsFrom } from '../rpc/nori/noriBridgeInfraTransitions.impl.js';
-import { getBridgeStateWithTimings$ as bridgeStateWithTimingsFrom } from '../rpc/nori/state.js';
+import { bridgeStateWithTimings$ as bridgeStateWithTimingsFrom } from '../rpc/nori/state.js';
 import {
-    getBridgeStateTopic$ as bridgeStateFrom,
-    getBridgeTimingsTopic$ as bridgeTimingsFrom,
-    getEthStateTopic$ as ethStateFrom,
-    getSystemNoticesTopic$ as systemNoticesFrom,
-    getTransitionNoticesTopic$ as transitionNoticesFrom,
+    bridgeStateTopic$ as bridgeStateFrom,
+    bridgeTimingsTopic$ as bridgeTimingsFrom,
+    ethStateTopic$ as ethStateFrom,
+    systemNoticesTopic$ as systemNoticesFrom,
+    transitionNoticesTopic$ as transitionNoticesFrom,
 } from '../rpc/nori/topics.js';
 
 export { NoriBridgeInfraTransitionGraph, type NoriBridgeInfraTransitionState } from '../rpc/nori/noriBridgeInfraTransitions.js';
@@ -24,7 +23,12 @@ export {
     type NoriJobTimings,
     type NoriStage,
 } from '../rpc/nori/commitTimes.js';
-export { type NoriBridgeInfraTransitions } from '../rpc/nori/noriBridgeInfraTransitions.impl.js';
+export {
+    type NoriBridgeInfraStage,
+    type NoriBridgeInfraStageSince,
+    type NoriBridgeInfraTransitions,
+} from '../rpc/nori/noriBridgeInfraTransitions.impl.js';
+export { arrived, type Arrived } from '../rpc/nori/state.js';
 
 /**
  * Nori's prover stage, from its `state.bridge`; replays the latest.
@@ -32,7 +36,7 @@ export { type NoriBridgeInfraTransitions } from '../rpc/nori/noriBridgeInfraTran
  * @param nori Nori.
  * @returns The prover's stage, each time it changes.
  */
-export const getNoriBridgeInfraState$ = (nori: Nori) => bridgeStateFrom(nori.websocket.socket);
+export const noriBridgeInfraState$ = (nori: Nori) => bridgeStateFrom(nori.websocket.socket);
 
 /**
  * The expected time per stage, from Nori's `timings.notices.transition`; replays the latest.
@@ -40,7 +44,7 @@ export const getNoriBridgeInfraState$ = (nori: Nori) => bridgeStateFrom(nori.web
  * @param nori Nori.
  * @returns The timings, each time they change.
  */
-export const getNoriBridgeInfraTimings$ = (nori: Nori) => bridgeTimingsFrom(nori.websocket.socket);
+export const noriBridgeInfraTimings$ = (nori: Nori) => bridgeTimingsFrom(nori.websocket.socket);
 
 /**
  * Ethereum's latest finalized block and slot, from Nori's `state.eth`; replays the latest.
@@ -48,7 +52,7 @@ export const getNoriBridgeInfraTimings$ = (nori: Nori) => bridgeTimingsFrom(nori
  * @param nori Nori.
  * @returns Ethereum's finality, each time it moves.
  */
-export const getNoriBridgeInfraEthState$ = (nori: Nori) => ethStateFrom(nori.websocket.socket);
+export const noriBridgeInfraEthState$ = (nori: Nori) => ethStateFrom(nori.websocket.socket);
 
 /**
  * The prover pipeline's transition notices, as they happen.
@@ -56,7 +60,7 @@ export const getNoriBridgeInfraEthState$ = (nori: Nori) => ethStateFrom(nori.web
  * @param nori Nori.
  * @returns Each transition notice.
  */
-export const getNoriBridgeInfraTransitionNotices$ = (nori: Nori) =>
+export const noriBridgeInfraTransitionNotices$ = (nori: Nori) =>
     transitionNoticesFrom(nori.websocket.socket);
 
 /**
@@ -65,7 +69,7 @@ export const getNoriBridgeInfraTransitionNotices$ = (nori: Nori) =>
  * @param nori Nori.
  * @returns Each system notice.
  */
-export const getNoriBridgeInfraSystemNotices$ = (nori: Nori) => systemNoticesFrom(nori.websocket.socket);
+export const noriBridgeInfraSystemNotices$ = (nori: Nori) => systemNoticesFrom(nori.websocket.socket);
 
 /**
  * Nori's prover stage with the time left in it, ticking every second.
@@ -73,13 +77,14 @@ export const getNoriBridgeInfraSystemNotices$ = (nori: Nori) => systemNoticesFro
  * @param nori Nori.
  * @returns The stage and the time left.
  */
-export const getNoriBridgeInfraStateWithTimings$ = (nori: Nori) =>
+export const noriBridgeInfraStateWithTimings$ = (nori: Nori) =>
     bridgeStateWithTimingsFrom(nori.websocket.socket);
 
 /**
- * Follows Nori's prover pipeline from its transition notices.
+ * Nori's pipeline transitions and the stage it is at: the one instance
+ * `createConnections` started for this websocket, shared by every caller.
  *
- * @param nori Nori.
- * @returns `noriBridgeInfraTransitions` (`{ state$ }`), `finalityTransitions$` and `warnings$`.
+ * @param nori Nori, from `createConnections`.
+ * @returns The transitions, `stage$` among them.
  */
-export const startNoriBridgeInfraTransitions = (nori: Nori) => startNoriBridgeInfraTransitionsFrom(nori.websocket);
+export const getNoriBridgeInfraTransitions = (nori: Nori) => nori.transitions;

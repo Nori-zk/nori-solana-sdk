@@ -1,8 +1,14 @@
 export interface HealthCheckTimings {
-    /** Delay between background health checks while ready, in ms (default: 15000). */
+    /** Delay between background health checks while ready, in ms (default: 5000). */
     healthCheckIntervalMs?: number;
-    /** Time a health check may take before the endpoint counts as unreachable, in ms (default: 10000). */
+    /** Time a health check may take before the endpoint counts as unreachable, in ms (default: 3000). */
     healthCheckTimeoutMs?: number;
+    /**
+     * Time any request through an http connection may take before it fails
+     * as one that never reached the node, in ms (default: 10000). It reports
+     * the failure, so the connection checks itself at once.
+     */
+    requestTimeoutMs?: number;
     /** Exponential backoff between health checks while unreachable. */
     retryBackoff?: {
         /** Wait before the first retry, in ms (default: 1000). */
@@ -16,6 +22,7 @@ export interface HealthCheckTimings {
 export interface ResolvedHealthCheckTimings {
     healthCheckIntervalMs: number;
     healthCheckTimeoutMs: number;
+    requestTimeoutMs: number;
     initialDelayMs: number;
     maxDelayMs: number;
 }
@@ -27,13 +34,15 @@ export interface ResolvedHealthCheckTimings {
  * @returns Every timing, with defaults for those not set.
  */
 export function resolveHealthCheckTimings({
-    healthCheckIntervalMs = 15_000,
-    healthCheckTimeoutMs = 10_000,
+    healthCheckIntervalMs = 5000,
+    healthCheckTimeoutMs = 3000,
+    requestTimeoutMs = 10_000,
     retryBackoff: { initialDelayMs = 1000, maxDelayMs = 30_000 } = {},
 }: HealthCheckTimings = {}): ResolvedHealthCheckTimings {
     return {
         healthCheckIntervalMs,
         healthCheckTimeoutMs,
+        requestTimeoutMs,
         initialDelayMs,
         maxDelayMs,
     };

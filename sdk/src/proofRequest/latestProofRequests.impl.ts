@@ -1,42 +1,12 @@
-import {
-    EMPTY,
-    filter,
-    map,
-    merge,
-    type Observable,
-    ReplaySubject,
-    share,
-    Subject,
-    switchMap,
-    take,
-    timer,
-} from 'rxjs';
-import {
-    bothReady$,
-    type ConnectedRead,
-    type ConnectedReadClients,
-    type ProofRequestConnections,
-    readThroughConnections$,
-    waitingOnChanged$,
-} from './connectedRead.js';
-import {
-    fetchProofRequestHistoryPage,
-    type ProofRequestHistoryAddresses,
-    type ProofRequestHistoryEntry,
-} from './fetchProofRequestHistory.js';
-import { EthRpcTransportError } from '../rpc/eth/errors.js';
-import { type ProofRequestsByTargetQuery } from '../rpc/eth/fetchProofRequestsByTarget.js';
-import {
-    resolveHealthCheckTimings,
-    retryDelayMs,
-} from '../rpc/connection/healthCheckTimings.js';
-import { withBackoff } from '../utils/withBackoff.js';
-import { dataOnEntry$, stateOf$, type StartedMachine } from '../utils/machines.js';
-import {
-    LatestProofRequestsGraph,
-    type LatestProofRequestsState,
-} from './latestProofRequests.js';
-import { type ReadRetryBackoff } from './proofRequestHistory.impl.js';
+import { type ResolveNodeData } from '@yaw-rx/ystate';
+import { EMPTY, filter, map, merge, type Observable, switchMap, timer } from 'rxjs';
+import { type ConnectedReadClients, type ProofRequestConnections } from './connectedRead.js';
+import { fetchProofRequestHistoryPage$, type ProofRequestHistoryAddresses } from './fetchProofRequestHistory.js';
+import { blockNumber$ } from '../rpc/eth/blockNumber.js';
+import { type ProofRequestsByTargetQuery } from '../rpc/eth/proofRequestsByTarget.js';
+import { type ReadRetryBackoff, startReadThroughConnectionsMachine, dueOn } from '../rpc/connection/readThroughConnections.impl.js';
+import { withOutcome } from '../utils/machines.js';
+import { LatestProofRequestsGraph } from './latestProofRequests.js';
 
 export interface LatestProofRequestsQuery extends Pick<
     ProofRequestsByTargetQuery,
@@ -46,50 +16,21 @@ export interface LatestProofRequestsQuery extends Pick<
     count: number;
 }
 
-/** The newest requests read from a block up to the latest one. */
-interface NewestRequests {
-    view: ProofRequestHistoryEntry[];
-    /** The block of the oldest request in `view`, or the latest block when `view` is empty. */
-    oldestBlock: number;
-}
-
-/** A refresh's read, and whether a request the view showed has gone. */
-interface Refresh extends NewestRequests {
-    requestsMissing: boolean;
-}
-
-/**
- * Keeps only the reads with one outcome, narrowed to it.
- *
- * @param read$ Reads.
- * @param outcome The outcome to keep.
- * @returns The reads with that outcome.
- */
-function withOutcome<T, TOutcome extends ConnectedRead<T>['outcome']>(
-    read$: Observable<ConnectedRead<T>>,
-    outcome: TOutcome
-) {
-    return read$.pipe(
-        filter(
-            (read): read is Extract<ConnectedRead<T>, { outcome: TOutcome }> =>
-                read.outcome === outcome
-        )
-    );
-}
+/** The newest requests, and the block of the oldest one (the latest block when there are none). */
+type NewestRequests = ResolveNodeData<typeof LatestProofRequestsGraph.nodes, 'current'>;
 
 /**
  * Starts a live view of a submitting address's newest `count` proof
  * requests, newest first, reading through both connections. It refreshes
  * every `pollIntervalMs` and on every `recheckTrigger$` emission.
  *
- * @param connections The Ethereum provider and Solana RPC, with their running connectivity machines.
+ * @param connections The Ethereum and Solana chains, with their running connectivity machines.
  * @param addresses The queue and program addresses.
  * @param query The submitting address, lowest block and view size.
  * @param pollIntervalMs The delay between refreshes in ms (default: 15000).
  * @param recheckTrigger$ An extra refresh signal, e.g. bridge state changes from the websocket.
  * @param backoff How long a failed read waits before reading again.
- * @returns
- *   - `latestProofRequests`: the running machine; its states carry the view.
+ * @returns The running machine; its states carry the view. Its controls:
  *   - `retry()`: reads again now, without waiting, while failed.
  *   - `close()`: moves the machine to `closed`.
  */
@@ -101,263 +42,75 @@ export function createLatestProofRequestsMachine(
     recheckTrigger$: Observable<unknown> = EMPTY,
     backoff: ReadRetryBackoff = {}
 ) {
-    const timings = resolveHealthCheckTimings(backoff);
-    const retry$ = new Subject<void>();
-    const close$ = new Subject<void>();
-    const started$ = new ReplaySubject<StartedMachine<LatestProofRequestsState>>(1);
-    const state$ = stateOf$(started$);
-
     /**
      * Reads the newest `count` requests from `fromBlock` up to the latest block.
      *
      * @param clients The clients to read through.
+     * @param target The submitting address.
      * @param fromBlock The lowest block to read from.
-     * @returns The newest requests and the block of the oldest one.
+     * @returns The newest requests and the block of the oldest one, once.
      */
-    const readNewest = async (
-        { provider, rpc }: ConnectedReadClients,
-        fromBlock: number
-    ): Promise<NewestRequests> => {
-        const toBlock = await withBackoff(() =>
-            provider.getBlockNumber()
-        ).catch((error: unknown) => {
-            throw new EthRpcTransportError(
-                'Failed to read the latest block number.',
-                error
+    const readNewest$ = (clients: ConnectedReadClients, target: string, fromBlock: number): Observable<NewestRequests> =>
+        clients
+            .ethereum((provider) => blockNumber$(provider, 'latest'))
+            .pipe(
+                switchMap((toBlock) =>
+                    fetchProofRequestHistoryPage$(clients, addresses, {
+                        target,
+                        fromBlock,
+                        toBlock,
+                        order: 'desc',
+                        pageSize: query.count,
+                        maxBlockRangePerQuery: query.maxBlockRangePerQuery,
+                    }).pipe(
+                        map(({ entries }) => ({
+                            target,
+                            view: entries,
+                            oldestBlock: entries.length > 0 ? entries[entries.length - 1].blockNumber : toBlock,
+                        }))
+                    )
+                )
             );
-        });
-        const { entries } = await fetchProofRequestHistoryPage(
-            provider,
-            rpc,
-            addresses,
-            {
-                target: query.target,
-                fromBlock,
-                toBlock,
-                order: 'desc',
-                pageSize: query.count,
-                maxBlockRangePerQuery: query.maxBlockRangePerQuery,
-            }
+
+    /**
+     * A request the view showed is gone, so a reorg removed it: one not read
+     * again that the new view still reaches (it is not full, or the request
+     * is newer than its oldest). One pushed out by newer requests is not gone.
+     */
+    const requestsMissing = (value: NewestRequests, previous: NewestRequests, node: 'loading' | 'refreshing') => {
+        if (node !== 'refreshing') return false;
+        const read = new Set(value.view.map(({ requestId }) => requestId));
+        // The view is newest first: its last request is its oldest.
+        const oldestRead = value.view.length < query.count ? undefined : value.view[value.view.length - 1].requestId;
+        return previous.view.some(
+            ({ requestId }) => !read.has(requestId) && (oldestRead === undefined || requestId > oldestRead)
         );
-        return {
-            view: entries,
-            oldestBlock:
-                entries.length > 0
-                    ? entries[entries.length - 1].blockNumber
-                    : toBlock,
-        };
     };
 
-    // The outcome edges of `loading` share one read per entry into it.
-    const load$ = dataOnEntry$<LatestProofRequestsState, 'loading'>(
-        state$,
-        'loading'
-    ).pipe(
-        switchMap(() =>
-            readThroughConnections$(
-                connections,
-                (clients) => readNewest(clients, query.fromBlock),
-                'logs'
-            )
-        ),
-        share()
-    );
-    // The outcome edges of `refreshing` share one read per entry into it,
-    // from the oldest block of the view it carries. Fewer requests than the
-    // view showed (up to `count`) means a reorg removed one.
-    const refresh$ = dataOnEntry$<LatestProofRequestsState, 'refreshing'>(
-        state$,
-        'refreshing'
-    ).pipe(
-        switchMap(({ view, oldestBlock }) =>
-            readThroughConnections$(
-                connections,
-                async (clients): Promise<Refresh> => {
-                    const newest = await readNewest(clients, oldestBlock);
-                    return {
-                        ...newest,
-                        requestsMissing:
-                            newest.view.length <
-                            Math.min(query.count, view.length),
-                    };
-                },
-                'logs'
-            )
-        ),
-        share()
-    );
-    const refreshSucceeded$ = withOutcome(refresh$, 'succeeded');
-    // A failed read waits before reading again, doubling with each one in a row.
-    const retryDue$ = merge(
-        dataOnEntry$<LatestProofRequestsState, 'failedBeforeFirstView'>(
-            state$,
-            'failedBeforeFirstView'
-        ),
-        dataOnEntry$<LatestProofRequestsState, 'failed'>(state$, 'failed')
-    ).pipe(
-        take(1),
-        map(({ failedReads }) => failedReads),
-        switchMap((failedReads) => timer(retryDelayMs(failedReads, timings)))
-    );
-
-    const machine = LatestProofRequestsGraph.implement({
-        viewArrived: {
-            $: () => withOutcome(load$, 'succeeded'),
-            next: ({ value }) => ({
-                view: value.view,
-                oldestBlock: value.oldestBlock,
-            }),
-        },
-        refreshDue: {
-            $: () =>
-                merge(timer(pollIntervalMs), recheckTrigger$).pipe(take(1)),
-            next: (_due, _dest, source) => ({
-                view: source.view,
-                oldestBlock: source.oldestBlock,
-                failedReads: 0,
-            }),
-        },
-        refreshArrived: {
-            $: () =>
-                refreshSucceeded$.pipe(
-                    filter(({ value }) => !value.requestsMissing)
-                ),
-            next: ({ value }) => ({
-                view: value.view,
-                oldestBlock: value.oldestBlock,
-            }),
-        },
-        requestsMissing: {
-            $: () =>
-                refreshSucceeded$.pipe(
-                    filter(({ value }) => value.requestsMissing)
-                ),
-            next: (_missing, _dest, source) => ({
-                view: source.view,
-                failedReads: source.failedReads,
-            }),
-        },
-        connectionLost: {
-            $: () =>
-                merge(
-                    withOutcome(load$, 'connectionLost'),
-                    withOutcome(refresh$, 'connectionLost')
-                ),
-            next: ({ waitingOn }, _dest, source) =>
-                'oldestBlock' in source
-                    ? {
-                          view: source.view,
-                          oldestBlock: source.oldestBlock,
-                          failedReads: source.failedReads,
-                          waitingOn,
-                      }
-                    : {
-                          view: source.view,
-                          failedReads: source.failedReads,
-                          waitingOn,
-                      },
-        },
-        readFailedOnHealthyConnection: {
-            $: () =>
-                merge(
-                    withOutcome(load$, 'failedOnHealthyConnection'),
-                    withOutcome(refresh$, 'failedOnHealthyConnection')
-                ),
-            next: ({ error }, _dest, source) =>
-                'oldestBlock' in source
-                    ? {
-                          view: source.view,
-                          oldestBlock: source.oldestBlock,
-                          failedReads: source.failedReads + 1,
-                          error,
-                      }
-                    : {
-                          view: source.view,
-                          failedReads: source.failedReads + 1,
-                          error,
-                      },
-        },
-        readFailed: {
-            $: () =>
-                merge(
-                    withOutcome(load$, 'failed'),
-                    withOutcome(refresh$, 'failed')
-                ),
-            next: ({ error }, _dest, source) =>
-                'oldestBlock' in source
-                    ? {
-                          view: source.view,
-                          oldestBlock: source.oldestBlock,
-                          failedReads: source.failedReads + 1,
-                          error,
-                      }
-                    : {
-                          view: source.view,
-                          failedReads: source.failedReads + 1,
-                          error,
-                      },
-        },
-        connectionsChanged: {
-            $: () => waitingOnChanged$(connections),
-            next: (waitingOn, _dest, source) =>
-                'oldestBlock' in source
-                    ? {
-                          view: source.view,
-                          oldestBlock: source.oldestBlock,
-                          failedReads: source.failedReads,
-                          waitingOn,
-                      }
-                    : {
-                          view: source.view,
-                          failedReads: source.failedReads,
-                          waitingOn,
-                      },
-        },
-        connectionRestored: {
-            $: () => bothReady$(connections),
-            next: (_restored, _dest, source) =>
-                'oldestBlock' in source
-                    ? {
-                          view: source.view,
-                          oldestBlock: source.oldestBlock,
-                          failedReads: source.failedReads,
-                      }
-                    : { view: source.view, failedReads: source.failedReads },
-        },
-        retryDue: {
-            $: () => retryDue$,
-            next: (_due, _dest, source) =>
-                'oldestBlock' in source
-                    ? {
-                          view: source.view,
-                          oldestBlock: source.oldestBlock,
-                          failedReads: source.failedReads,
-                      }
-                    : { view: source.view, failedReads: source.failedReads },
-        },
-        retry: {
-            $: () => retry$,
-            next: (_retry, _dest, source) =>
-                'oldestBlock' in source
-                    ? {
-                          view: source.view,
-                          oldestBlock: source.oldestBlock,
-                          failedReads: source.failedReads,
-                      }
-                    : { view: source.view, failedReads: source.failedReads },
-        },
-        close: {
-            $: () => close$,
-            next: () => ({}),
-        },
+    return startReadThroughConnectionsMachine(LatestProofRequestsGraph, {
+        connections,
+        // A load reads from `fromBlock`; a refresh from the oldest block of the view it holds.
+        read: (clients, previous, node) =>
+            readNewest$(clients, previous.target, node === 'loading' ? query.fromBlock : previous.oldestBlock),
+        refreshOn: () => dueOn(merge(timer(pollIntervalMs), recheckTrigger$)),
+        arrivedElsewhere: requestsMissing,
+        kind: 'logs',
+        backoff,
+        ownTransitions: (read$) => ({
+            // A request in the view has gone: load everything again from `fromBlock`, keeping the view on screen.
+            requestsMissing: {
+                $: () =>
+                    withOutcome(read$, 'succeeded').pipe(
+                        filter(({ value, previous, node }) => requestsMissing(value, previous, node))
+                    ),
+                next: (
+                    _missing: unknown,
+                    _dest: unknown,
+                    { target, view, oldestBlock, failedReads }: NewestRequests & { failedReads: number }
+                ) => ({ target, view, oldestBlock, failedReads }),
+            },
+        }),
+        // The submitting address is its starting data.
+        start: { node: 'loading', data: { target: query.target, view: [], oldestBlock: 0, failedReads: 0 } },
     });
-
-    const latestProofRequests = machine.close().start('loading');
-    started$.next(latestProofRequests);
-
-    return {
-        latestProofRequests,
-        retry: () => retry$.next(),
-        close: () => close$.next(),
-    };
 }

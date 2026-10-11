@@ -1,4 +1,4 @@
-import { type EnqueuedProofRequest } from '../rpc/eth/fetchEnqueuedProofRequests.js';
+import { type EnqueuedProofRequest } from '../rpc/eth/enqueuedProofRequests.js';
 import { MAX_BATCH_SIZE, NORI_JOB_STAGES, type NoriJobStage } from '../rpc/nori/commitTimes.js';
 
 /** The job Nori is in, as its `state.bridge` reports it: the stage and the Ethereum blocks the job proves. */

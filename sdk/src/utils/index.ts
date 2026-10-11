@@ -3,5 +3,6 @@ export {
     dataOnEntry$,
     stateOf$,
     type AsNodeData,
+    type GraphState,
     type StartedMachine,
 } from './machines.js';

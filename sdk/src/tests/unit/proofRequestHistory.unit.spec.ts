@@ -1,9 +1,11 @@
+import { firstValueFrom } from 'rxjs';
 import {
-    fetchProofRequestCountsByTarget,
-    fetchProofRequestHistoryPage,
+    fetchProofRequestHistoryPage$,
     type ProofRequestHistoryEntry,
 } from '../../proofRequest/fetchProofRequestHistory.js';
+import { createProofRequestCountsMachine } from '../../proofRequest/proofRequestCounts.impl.js';
 import { createProofRequestHistoryMachine } from '../../proofRequest/proofRequestHistory.impl.js';
+import { connectedReadClientsOf } from '../../proofRequest/connectedRead.js';
 import {
     createContiguousBatches,
     createFakeEthereumProvider,
@@ -11,7 +13,7 @@ import {
     createTestConnections,
     FAST_TIMINGS,
     QUEUE_ADDRESS,
-    reach,
+    waitForNode,
     TARGET_A,
     TARGET_B,
     type FakeProofRequest,
@@ -50,20 +52,22 @@ async function setUp(queueCursor = 16) {
     const solana = await createFakeSolanaRpc(batchesUpTo(queueCursor));
     const test = createTestConnections(ethereum.provider, solana.rpc);
     await Promise.all([
-        reach(test.connections.ethereum.http.connection, 'ready'),
-        reach(test.connections.solana.http.connection, 'ready'),
+        waitForNode(test.connections.ethereum.http.connection, 'ready'),
+        waitForNode(test.connections.solana.http.connection, 'ready'),
     ]);
     return { ethereum, solana, ...test };
 }
 
 describe('proof request history reads', () => {
     test('a page classifies each request against the committed batches', async () => {
-        const { ethereum, solana, close } = await setUp();
-        const page = await fetchProofRequestHistoryPage(
-            ethereum.provider,
-            solana.rpc,
-            addresses,
-            { target: TARGET_A, fromBlock: 0, order: 'asc', pageSize: 10 }
+        const { connections, close } = await setUp();
+        const page = await firstValueFrom(
+            fetchProofRequestHistoryPage$(connectedReadClientsOf(connections, 'logs'), addresses, {
+                target: TARGET_A,
+                fromBlock: 0,
+                order: 'asc',
+                pageSize: 10,
+            })
         );
         expect(page.entries.map(describeEntry)).toEqual([
             '0:batch0',
@@ -90,15 +94,20 @@ describe('proof request history reads', () => {
         expect(page.done).toBe(false);
         close();
     });
+});
 
+describe('proof request counts machine', () => {
     test('counts proven and unprocessed requests per submitting address', async () => {
-        const { ethereum, solana, close } = await setUp();
-        expect(
-            await fetchProofRequestCountsByTarget(ethereum.provider, solana.rpc, addresses, {
-                target: TARGET_A,
-                fromBlock: 0,
-            })
-        ).toEqual({ total: 20, proofAvailable: 8, unprocessed: 12 });
+        const { connections, close } = await setUp();
+        const proofRequestCounts = createProofRequestCountsMachine(
+            connections,
+            addresses,
+            { target: TARGET_A, fromBlock: 0 },
+            FAST_TIMINGS
+        );
+        const counted = await waitForNode(proofRequestCounts, 'current');
+        expect(counted.data.counts).toEqual({ total: 20, proofAvailable: 8, unprocessed: 12 });
+        proofRequestCounts.close();
         close();
     });
 });
@@ -106,14 +115,14 @@ describe('proof request history reads', () => {
 describe('proof request history machine', () => {
     test('pages through on demand until the range is exhausted', async () => {
         const { connections, close } = await setUp();
-        const { proofRequestHistory, loadMore } =
+        const proofRequestHistory =
             createProofRequestHistoryMachine(
                 connections,
                 addresses,
                 { target: TARGET_A, fromBlock: 0, order: 'desc', pageSize: 8 },
                 FAST_TIMINGS
             );
-        const first = await reach(proofRequestHistory, 'waitingForMore');
+        const first = await waitForNode(proofRequestHistory, 'current');
         expect(loadedOf(first.data).map((entry) => entry.requestId)).toEqual([
             38n,
             36n,
@@ -124,11 +133,11 @@ describe('proof request history machine', () => {
             26n,
             24n,
         ]);
-        loadMore();
-        await reach(proofRequestHistory, 'loadingPage');
-        await reach(proofRequestHistory, 'waitingForMore');
-        loadMore();
-        const all = await reach(proofRequestHistory, 'allLoaded');
+        proofRequestHistory.loadMore();
+        await waitForNode(proofRequestHistory, 'refreshing');
+        await waitForNode(proofRequestHistory, 'current');
+        proofRequestHistory.loadMore();
+        const all = await waitForNode(proofRequestHistory, 'allLoaded');
         expect(loadedOf(all.data).map((entry) => entry.requestId)).toEqual(
             Array.from({ length: 20 }, (_, i) => BigInt(38 - i * 2))
         );
@@ -137,29 +146,29 @@ describe('proof request history machine', () => {
 
     test('going offline is waited for, with the connections named, and the page resumes after', async () => {
         const { connections, network$, close } = await setUp();
-        const { proofRequestHistory, loadMore } =
+        const proofRequestHistory =
             createProofRequestHistoryMachine(
                 connections,
                 addresses,
                 { target: TARGET_A, fromBlock: 0, order: 'asc', pageSize: 5 },
                 FAST_TIMINGS
             );
-        await reach(proofRequestHistory, 'waitingForMore');
+        await waitForNode(proofRequestHistory, 'current');
         network$.next('offline');
-        await reach(
+        await waitForNode(
             connections.ethereum.http.connection,
             'offline'
         );
-        loadMore();
-        const waiting = await reach(
+        proofRequestHistory.loadMore();
+        const waiting = await waitForNode(
             proofRequestHistory,
-            'waitingForConnection'
+            'waitingForConnectionWhileRefreshing'
         );
         expect(waiting.data).toEqual(
             expect.objectContaining({ waitingOn: ['ethereum', 'solana'] })
         );
         network$.next('online');
-        const second = await reach(proofRequestHistory, 'waitingForMore');
+        const second = await waitForNode(proofRequestHistory, 'current');
         expect(loadedOf(second.data).map((entry) => entry.requestId)).toEqual([
             0n,
             2n,
@@ -178,20 +187,20 @@ describe('proof request history machine', () => {
     test('a read that fails while its connection is healthy fails, then retries by itself', async () => {
         const { ethereum, connections, ethereumReadFailures, close } =
             await setUp();
-        // More failures than the read's own retries: it gives up and reports.
+        // Several failures in a row: the first is a failed read, which the machine reads again.
         ethereum.state.failNextReads = 6;
-        const { proofRequestHistory } = createProofRequestHistoryMachine(
+        const proofRequestHistory = createProofRequestHistoryMachine(
             connections,
             addresses,
             { target: TARGET_A, fromBlock: 0, order: 'asc', pageSize: 5 },
             FAST_TIMINGS
         );
-        const failed = await reach(proofRequestHistory, 'failed');
+        const failed = await waitForNode(proofRequestHistory, 'failedWhileLoading');
         expect(failed.data).toEqual(
             expect.objectContaining({ failedReads: 1 })
         );
         expect(ethereumReadFailures.count).toBe(1);
-        const recovered = await reach(proofRequestHistory, 'waitingForMore');
+        const recovered = await waitForNode(proofRequestHistory, 'current');
         expect(loadedOf(recovered.data)).toHaveLength(5);
         close();
     }, 60_000);
@@ -201,15 +210,15 @@ describe('proof request history machine', () => {
             await setUp();
         world.solanaGoesDownOnReadFailure = true;
         solana.state.failNextReads = Infinity;
-        const { proofRequestHistory } = createProofRequestHistoryMachine(
+        const proofRequestHistory = createProofRequestHistoryMachine(
             connections,
             addresses,
             { target: TARGET_A, fromBlock: 0, order: 'asc', pageSize: 5 },
             FAST_TIMINGS
         );
-        const waiting = await reach(
+        const waiting = await waitForNode(
             proofRequestHistory,
-            'waitingForConnection'
+            'waitingForConnectionWhileLoading'
         );
         expect(waiting.data).toEqual(
             expect.objectContaining({ waitingOn: ['solana'] })
@@ -217,7 +226,7 @@ describe('proof request history machine', () => {
         expect(solanaReadFailures.count).toBe(1);
         world.solanaAnswers = true;
         solana.state.failNextReads = 0;
-        await reach(proofRequestHistory, 'waitingForMore');
+        await waitForNode(proofRequestHistory, 'current');
         close();
     }, 60_000);
 });

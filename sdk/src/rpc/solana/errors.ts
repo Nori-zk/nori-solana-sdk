@@ -3,7 +3,14 @@ import {
     SOLANA_ERROR__JSON_RPC__SERVER_ERROR_NODE_UNHEALTHY,
     SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR,
 } from '@solana/kit';
-import { withBackoff } from '../../utils/withBackoff.js';
+
+/** The app gave no Solana wallet: a setup mistake, not a state to wait out. */
+export class NoSolanaWalletConfiguredError extends Error {
+    constructor() {
+        super('No Solana wallet is configured: give solana.wallet to createConnections to use one.');
+        this.name = 'NoSolanaWalletConfiguredError';
+    }
+}
 
 /** A Solana RPC read failed to reach a healthy node. */
 export class SolanaRpcTransportError extends Error {
@@ -31,31 +38,6 @@ export function isSolanaRpcTransportFailure(error: unknown): boolean {
         isSolanaError(error, SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR) ||
         isSolanaError(error, SOLANA_ERROR__JSON_RPC__SERVER_ERROR_NODE_UNHEALTHY)
     );
-}
-
-/**
- * Runs a Solana RPC read, retrying transport failures with backoff and
- * reporting one that persists as `SolanaRpcTransportError`. Every other
- * error is thrown at once, as is.
- *
- * @param description What the read does, for the error message.
- * @param read The read to run.
- * @returns The read's result.
- * @throws SolanaRpcTransportError When the read still fails to reach a
- *   healthy node after its retries.
- */
-export async function withSolanaRpcTransportErrors<T>(
-    description: string,
-    read: () => Promise<T>
-): Promise<T> {
-    try {
-        return await withBackoff(read, isSolanaRpcTransportFailure);
-    } catch (error) {
-        if (isSolanaRpcTransportFailure(error)) {
-            throw new SolanaRpcTransportError(`${description} failed.`, error);
-        }
-        throw error;
-    }
 }
 
 export class SolanaAccountMismatchError extends Error {

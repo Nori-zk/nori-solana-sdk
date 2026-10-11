@@ -23,7 +23,7 @@ export const DEFAULT_NORI_WEBSOCKET_URL = 'wss://wss.solana.nori.it.com';
  */
 export function noriWebsocket(
     config: Partial<ReconnectingWebSocketConfig<unknown>>,
-    network: NetworkMachine['network'],
+    network: NetworkMachine,
     heartBeatInterval: number = 3000,
     pongTimeoutMultiplier: number = 2
 ) {

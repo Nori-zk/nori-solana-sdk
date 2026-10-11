@@ -1,64 +1,23 @@
-import { distinctUntilKeyChanged, type Observable } from 'rxjs';
-import { type Ethereum, forCalls, forSubscriptions } from '../rpc/connection/connections.js';
-import { fetchFinalizedBlockNumber as fetchFinalizedBlockNumberFrom } from '../rpc/eth/fetchFinalizedBlockNumber.js';
-import { fetchLatestBlockHeight as fetchLatestBlockHeightFrom } from '../rpc/eth/fetchLatestBlockHeight.js';
-import {
-    type EthereumLogNotification,
-    type EthereumLogsFilter,
-    type EthereumNewHeadNotification,
-    latestHeadFrom,
-    logsFrom,
-    logsSinceFrom,
-    newHeadsFrom,
-} from '../rpc/eth/topics.js';
+export type { EthereumLogsFilter } from '../rpc/eth/topics.js';
+export { ethRpcRead$ } from '../rpc/eth/ethRpcRead.js';
+export { blockRanges, MAX_BLOCK_RANGE_PER_QUERY } from '../rpc/eth/blockRanges.js';
+export { EthRpcTransportError } from '../rpc/eth/errors.js';
+export type { EthereumTransactionReceipt } from '../rpc/eth/transactionReceipt.js';
 
-export type { EthereumLogNotification, EthereumLogsFilter, EthereumNewHeadNotification };
+// A transaction's receipt, read through the Ethereum connection until it is mined.
+export { TransactionReceiptGraph, type TransactionReceiptState } from '../rpc/connection/transactionReceipt.js';
+export { createTransactionReceiptMachine } from '../rpc/connection/transactionReceipt.impl.js';
 
-/**
- * The latest Ethereum block's number.
- *
- * @param ethereum The Ethereum chain; calls go in its calls order.
- * @returns The latest block number.
- */
-export function getLatestBlockHeight(ethereum: Ethereum): Promise<number> {
-    return forCalls(ethereum, fetchLatestBlockHeightFrom);
-}
-
-/**
- * The latest finalized Ethereum block's number.
- *
- * @param ethereum The Ethereum chain; calls go in its calls order.
- * @returns The latest finalized block number.
- */
-export function getFinalizedBlockNumber(ethereum: Ethereum): Promise<number> {
-    return forCalls(ethereum, fetchFinalizedBlockNumberFrom);
-}
-
-/**
- * Each new block's header: subscribed in the chain's subscriptions order,
- * and while none of those is ready, polled through its calls order, in the
- * same shape.
- *
- * @param ethereum The Ethereum chain.
- * @returns Each new head.
- */
-export function getNewHeads$(ethereum: Ethereum): Observable<EthereumNewHeadNotification> {
-    return forSubscriptions(ethereum, newHeadsFrom, latestHeadFrom)
-        .pipe(distinctUntilKeyChanged('hash')); // a poll finds the same head until a new block
-}
-
-/**
- * The logs matching a filter: subscribed in the chain's subscriptions
- * order, and while none of those is ready, the logs of each new block
- * polled through its calls order, in the same shape.
- *
- * @param ethereum The Ethereum chain.
- * @param filter The emitting contracts and topics.
- * @returns Each matching log.
- */
-export function getEthereumLogs$(
-    ethereum: Ethereum,
-    filter: EthereumLogsFilter
-): Observable<EthereumLogNotification> {
-    return forSubscriptions(ethereum, logsFrom, logsSinceFrom, filter, {});
-}
+export { sentTransactionOf, type TransactionToSend } from '../transaction/sentTransaction.js';
+export {
+    NotReadyToSendError,
+    type SentTransaction,
+    type TransactionCall,
+} from '../transaction/sentTransaction.impl.js';
+export { SignerTransactionGraph, type SignerTransactionState } from '../transaction/signerTransaction.js';
+export {
+    createSignerTransactionMachine,
+    type TransactionMachineOptions,
+} from '../transaction/signerTransaction.impl.js';
+export { WalletTransactionGraph, type WalletTransactionState } from '../rpc/connection/walletTransaction.js';
+export { createWalletTransactionMachine } from '../rpc/connection/walletTransaction.impl.js';

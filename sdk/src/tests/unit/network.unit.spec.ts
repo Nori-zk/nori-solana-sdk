@@ -1,6 +1,6 @@
 import { jest } from '@jest/globals';
 import { createNetworkMachine } from '../../rpc/connection/network.impl.js';
-import { reach, recordNodes, sleep } from '../testUtils.js';
+import { nodesUntil, statesDuring, waitForNode } from '../testUtils.js';
 
 describe('network machine', () => {
     let internetUp = true;
@@ -16,65 +16,52 @@ describe('network machine', () => {
     afterAll(() => fetchSpy.mockRestore());
 
     test('goes online when a probe answers, offline when probes stop answering, and back', async () => {
-        const { network, close } = createNetworkMachine({
+        const network = createNetworkMachine({
             probeIntervalMs: 50,
             probeTimeoutMs: 100,
         });
-        const visited = recordNodes(network);
-        await reach(network, 'online');
+        expect(await nodesUntil(network, 'online')).toEqual(['online']);
 
         internetUp = false;
-        const offline = await reach(network, 'offline');
+        // Passing background probes may keep it `online` until one fails.
+        expect((await nodesUntil(network, 'offline')).filter((node) => node !== 'online')).toEqual(['offline']);
+        const offline = await waitForNode(network, 'offline');
         expect(offline.data).toEqual({ since: expect.any(Number) });
 
         internetUp = true;
-        await reach(network, 'online');
-        close();
-        expect(visited).toEqual(
-            expect.arrayContaining(['checking', 'online', 'offline'])
-        );
-        expect(visited.indexOf('offline')).toBeGreaterThan(
-            visited.indexOf('online')
-        );
-        expect(visited.lastIndexOf('online')).toBeGreaterThan(
-            visited.indexOf('offline')
-        );
+        expect(await nodesUntil(network, 'online')).toEqual(['online']);
+        network.close();
     });
 
     test('starts offline when the first probe gets no answer', async () => {
         internetUp = false;
-        const { network, close } = createNetworkMachine({
+        const network = createNetworkMachine({
             probeIntervalMs: 50,
             probeTimeoutMs: 100,
         });
-        await reach(network, 'offline');
-        close();
+        await waitForNode(network, 'offline');
+        network.close();
     });
 
     test('a background probe that passes stays online without leaving it', async () => {
-        const { network, close } = createNetworkMachine({
+        const network = createNetworkMachine({
             probeIntervalMs: 30,
             probeTimeoutMs: 100,
         });
-        await reach(network, 'online');
-        const visited = recordNodes(network);
-        await sleep(150);
-        close();
-        expect(
-            visited.filter((node) => node !== 'online' && node !== 'closed')
-        ).toEqual([]);
-        expect(
-            visited.filter((node) => node === 'online').length
-        ).toBeGreaterThan(2);
+        await waitForNode(network, 'online');
+        const visited = (await statesDuring(network, 150)).map(({ node }) => node);
+        network.close();
+        expect(visited.filter((node) => node !== 'online')).toEqual([]);
+        expect(visited.length).toBeGreaterThan(2);
     });
 
     test('closes from any node', async () => {
-        const { network, close } = createNetworkMachine({
+        const network = createNetworkMachine({
             probeIntervalMs: 50,
             probeTimeoutMs: 100,
         });
-        await reach(network, 'online');
-        close();
-        await reach(network, 'closed');
+        await waitForNode(network, 'online');
+        network.close();
+        await waitForNode(network, 'closed');
     });
 });

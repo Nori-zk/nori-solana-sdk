@@ -9,7 +9,7 @@ import {
     createTestConnections,
     FAST_TIMINGS,
     QUEUE_ADDRESS,
-    reach,
+    waitForNode,
     TARGET_A,
     TARGET_B,
     type FakeProofRequest,
@@ -45,23 +45,23 @@ async function setUp(requests: FakeProofRequest[], queueCursor: number) {
     const solana = await createFakeSolanaRpc(batchesUpTo(queueCursor));
     const test = createTestConnections(ethereum.provider, solana.rpc);
     await Promise.all([
-        reach(test.connections.ethereum.http.connection, 'ready'),
-        reach(test.connections.solana.http.connection, 'ready'),
+        waitForNode(test.connections.ethereum.http.connection, 'ready'),
+        waitForNode(test.connections.solana.http.connection, 'ready'),
     ]);
     return { ethereum, solana, ...test };
 }
 
 /**
- * Waits for the view the machine shows while watching to match `view`.
+ * Waits for the view the machine holds in `current` to match `view`.
  *
  * @param machine The running live view machine.
  * @param view The view, described as `requestId:state` entries.
- * @returns Once the machine is watching with that view.
+ * @returns Once the machine is `current` with that view.
  */
-const watchingWith = (machine: RunningMachine, view: string) =>
+const currentWith = (machine: RunningMachine, view: string) =>
     firstValueFrom(
         machine.state$.pipe(
-            filter(({ node }) => node === 'watching'),
+            filter(({ node }) => node === 'current'),
             map(({ data }) => describeView(data)),
             filter((described) => described === view)
         )
@@ -71,7 +71,7 @@ describe('latest proof requests machine', () => {
     test('follows new requests and their batches being committed', async () => {
         const requests = createRequests();
         const { solana, connections, close } = await setUp(requests, 32);
-        const { latestProofRequests, close: closeView } =
+        const latestProofRequests =
             createLatestProofRequestsMachine(
                 connections,
                 addresses,
@@ -80,30 +80,30 @@ describe('latest proof requests machine', () => {
                 undefined,
                 FAST_TIMINGS
             );
-        await watchingWith(
+        await currentWith(
             latestProofRequests,
             '38:unprocessed,36:unprocessed,34:unprocessed,32:unprocessed'
         );
 
         await solana.setBatches(batchesUpTo(40));
-        await watchingWith(
+        await currentWith(
             latestProofRequests,
             '38:batch9,36:batch9,34:batch8,32:batch8'
         );
 
         requests.push({ requestId: 40n, blockNumber: 395, target: TARGET_A });
-        await watchingWith(
+        await currentWith(
             latestProofRequests,
             '40:unprocessed,38:batch9,36:batch9,34:batch8'
         );
-        closeView();
+        latestProofRequests.close();
         close();
     });
 
     test('a request a reorg removed leaves the view, which refills from older blocks', async () => {
         const requests = createRequests();
         const { connections, close } = await setUp(requests, 40);
-        const { latestProofRequests, close: closeView } =
+        const latestProofRequests =
             createLatestProofRequestsMachine(
                 connections,
                 addresses,
@@ -112,7 +112,7 @@ describe('latest proof requests machine', () => {
                 undefined,
                 FAST_TIMINGS
             );
-        await watchingWith(
+        await currentWith(
             latestProofRequests,
             '38:batch9,36:batch9,34:batch8'
         );
@@ -120,12 +120,35 @@ describe('latest proof requests machine', () => {
             requests.findIndex((request) => request.requestId === 36n),
             1
         );
-        await reach(latestProofRequests, 'loading');
-        await watchingWith(
+        await waitForNode(latestProofRequests, 'loading');
+        await currentWith(
             latestProofRequests,
             '38:batch9,34:batch8,32:batch8'
         );
-        closeView();
+        latestProofRequests.close();
+        close();
+    });
+
+    test('a request a reorg removed is noticed by its id when a new request keeps the view the same length', async () => {
+        const requests = createRequests();
+        const { connections, close } = await setUp(requests, 40);
+        const latestProofRequests = createLatestProofRequestsMachine(
+            connections,
+            addresses,
+            { target: TARGET_A, fromBlock: 0, count: 3 },
+            50,
+            undefined,
+            FAST_TIMINGS
+        );
+        await currentWith(latestProofRequests, '38:batch9,36:batch9,34:batch8');
+        requests.splice(
+            requests.findIndex((request) => request.requestId === 36n),
+            1
+        );
+        requests.push({ requestId: 40n, blockNumber: 395, target: TARGET_A });
+        await waitForNode(latestProofRequests, 'loading');
+        await currentWith(latestProofRequests, '40:unprocessed,38:batch9,34:batch8');
+        latestProofRequests.close();
         close();
     });
 
@@ -134,7 +157,7 @@ describe('latest proof requests machine', () => {
             createRequests(),
             40
         );
-        const { latestProofRequests, close: closeView } =
+        const latestProofRequests =
             createLatestProofRequestsMachine(
                 connections,
                 addresses,
@@ -143,20 +166,20 @@ describe('latest proof requests machine', () => {
                 undefined,
                 FAST_TIMINGS
             );
-        await watchingWith(latestProofRequests, '38:batch9,36:batch9');
+        await currentWith(latestProofRequests, '38:batch9,36:batch9');
         network$.next('offline');
-        const waiting = await reach(
+        const waiting = await waitForNode(
             latestProofRequests,
-            'waitingForConnection'
+            'waitingForConnectionWhileRefreshing'
         );
         expect(describeView(waiting.data)).toBe('38:batch9,36:batch9');
         expect(waiting.data).toEqual(
             expect.objectContaining({ waitingOn: ['ethereum', 'solana'] })
         );
         network$.next('online');
-        await watchingWith(latestProofRequests, '38:batch9,36:batch9');
-        closeView();
+        await currentWith(latestProofRequests, '38:batch9,36:batch9');
+        latestProofRequests.close();
         close();
-        await reach(latestProofRequests, 'closed');
+        await waitForNode(latestProofRequests, 'closed');
     });
 });

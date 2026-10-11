@@ -1,26 +1,43 @@
 import { getBase64Decoder, type Address } from '@solana/kit';
-import { type RunningMachine } from '@yaw-rx/ystate';
-import { getAddress, Log, TransactionReceipt, zeroPadValue } from 'ethers';
+import { getAddress, type JsonRpcSigner, Log, TransactionReceipt, type TransactionRequest, zeroPadValue } from 'ethers';
+import { type GraphState } from '../utils/machines.js';
 import {
+    asapScheduler,
     BehaviorSubject,
+    defer,
     filter,
     firstValueFrom,
+    forkJoin,
+    map,
     type Observable,
+    of,
+    skip,
     Subject,
+    subscribeOn,
+    takeUntil,
+    takeWhile,
+    throwError,
+    timeout,
+    timer,
+    toArray,
 } from 'rxjs';
 import { NoriProofRequestQueue__factory } from '@nori-zk/ethereum-solana-bridge';
 import type { EthereumProvider } from '@nori-zk/ethereum-solana-bridge/iso-provider';
 import { getNoriSolTokenBridgeEncoder } from '../program/accounts/noriSolTokenBridge.js';
 import { getProofRequestRootEntryEncoder } from '../program/accounts/proofRequestRootEntry.js';
-import { findStatePda } from '../program/pdas/state.js';
 import { TOKEN_PROGRAM_ADDRESS } from '../program/programs/token.js';
 import { type ProofRequestConnections } from '../proofRequest/connectedRead.js';
-import { findProofQueueBatchPda } from '../rpc/solana/findProofQueueBatchPda.js';
+import { proofQueueBatchAddress$, stateAddress$ } from '../rpc/solana/programAddresses.js';
 import { SolanaRpcTransportError } from '../rpc/solana/errors.js';
 import type { SolanaHealth, SolanaRpc } from '../rpc/solana/solanaHttp.js';
 import type { EthereumHealth } from '../rpc/eth/ethereumHttp.js';
 import { httpConnection } from '../rpc/connection/httpConnection.impl.js';
-import { ethereumChain, solanaChain, type SolanaTransports } from '../rpc/connection/connections.js';
+import {
+    ethereumChain,
+    type EthereumTransports,
+    solanaChain,
+    type SolanaTransports,
+} from '../rpc/connection/connections.js';
 
 export const QUEUE_ADDRESS = getAddress('0x' + '11'.repeat(20));
 export const TARGET_A = getAddress('0x' + 'aa'.repeat(20));
@@ -35,44 +52,92 @@ export const FAST_TIMINGS = {
     retryBackoff: { initialDelayMs: 20, maxDelayMs: 80 },
 };
 
-export const sleep = (ms: number) =>
-    new Promise((resolve) => setTimeout(resolve, ms));
+/** How often the test chains poll while no transport can subscribe. */
+export const FAST_POLL_INTERVAL_MS = 50;
 
 /**
- * Waits until a running machine reaches `node`, failing after `timeoutMs`.
+ * Waits until a running machine is in `node`, failing after `timeoutMs`.
  *
  * @param machine The running machine.
  * @param node The node to wait for.
  * @param timeoutMs How long to wait.
- * @returns The state at `node`.
+ * @returns The machine's state in `node`, typed by its graph.
  */
-export function reach(
-    machine: RunningMachine,
-    node: string,
+export function waitForNode<TState extends { node: string }, TNode extends TState['node']>(
+    machine: { state$: Observable<TState> },
+    node: TNode,
     timeoutMs = 30_000
-): Promise<{ node: string; data: unknown }> {
-    return Promise.race([
-        firstValueFrom(
-            machine.state$.pipe(filter((state) => state.node === node))
-        ),
-        sleep(timeoutMs).then(() => {
-            throw new Error(`Did not reach ${node} within ${timeoutMs}ms.`);
-        }),
-    ]);
+): Promise<Extract<TState, { node: TNode }>> {
+    return firstValueFrom(
+        machine.state$.pipe(
+            filter((state): state is Extract<TState, { node: TNode }> => state.node === node),
+            timeout({
+                first: timeoutMs,
+                with: () => throwError(() => new Error(`Was not in ${node} within ${timeoutMs}ms.`)),
+            })
+        )
+    );
 }
 
 /**
- * Records every node a running machine visits.
+ * Waits until a running machine's state matches `matches`, failing after `timeoutMs`.
  *
  * @param machine The running machine.
- * @returns The visited nodes, in order, as they happen.
+ * @param matches The test on its state.
+ * @param timeoutMs How long to wait.
+ * @returns The first state that matches.
  */
-export function recordNodes(machine: {
-    state$: Observable<{ node: string }>;
-}): string[] {
-    const nodes: string[] = [];
-    machine.state$.subscribe(({ node }) => nodes.push(node));
-    return nodes;
+export function waitForState<TState>(
+    machine: { state$: Observable<TState> },
+    matches: (state: TState) => boolean,
+    timeoutMs = 30_000
+): Promise<TState> {
+    return firstValueFrom(
+        machine.state$.pipe(
+            filter(matches),
+            timeout({
+                first: timeoutMs,
+                with: () => throwError(() => new Error(`No matching state within ${timeoutMs}ms.`)),
+            })
+        )
+    );
+}
+
+/**
+ * The nodes a machine moves to from now on, until it reaches `until`
+ * (included). Call it before what makes the machine move.
+ *
+ * @param machine The running machine.
+ * @param until The node to stop at, or a test on the state to stop at.
+ * @param timeoutMs How long the moves may take.
+ * @returns The nodes it moved to, in order, once it reaches `until`.
+ */
+export function nodesUntil<TState extends { node: string }>(
+    machine: { state$: Observable<TState> },
+    until: TState['node'] | ((state: TState) => boolean),
+    timeoutMs = 30_000
+): Promise<string[]> {
+    const reached = typeof until === 'string' ? (state: TState) => state.node === until : until;
+    return firstValueFrom(
+        machine.state$.pipe(
+            skip(1),
+            takeWhile((state) => !reached(state), true),
+            map(({ node }) => node),
+            toArray(),
+            timeout(timeoutMs)
+        )
+    );
+}
+
+/**
+ * The states a machine is in over the next `ms`, starting with where it is now.
+ *
+ * @param machine The running machine.
+ * @param ms How long to watch it.
+ * @returns Its states, in order, once the time is up.
+ */
+export function statesDuring<TState>(machine: { state$: Observable<TState> }, ms: number): Promise<TState[]> {
+    return firstValueFrom(machine.state$.pipe(takeUntil(timer(ms)), toArray()));
 }
 
 /** A proof request as the fake queue emits it. */
@@ -80,6 +145,8 @@ export interface FakeProofRequest {
     requestId: bigint;
     blockNumber: number;
     target: string;
+    /** The transaction's receipt status: 1 for success (default), 0 for a revert. */
+    status?: number;
 }
 
 /** The transaction hash the fake chain gives the transaction that enqueued `requestId`. */
@@ -101,22 +168,32 @@ export function createRandom(seed: number) {
 }
 
 /**
- * An Ethereum provider serving `ProofRequested` logs and receipts for
- * `requests`, as a node would: logs filtered by block range and indexed
- * `target`, requests above `latestBlock` not yet mined. Log queries spanning
- * more than `maxBlockRange` blocks are rejected, as providers do;
- * `failNextReads` makes the next reads fail as an unreachable node does.
+ * An Ethereum provider serving `ProofRequested` logs, receipts, transactions,
+ * nonces and the blocks up to `latestBlock` (block `n` produced at `12n` s) for `requests`, as a node
+ * would: logs filtered by block range and indexed `target`, requests above
+ * `latestBlock` not yet mined. Log queries spanning more than
+ * `maxBlockRange` blocks are rejected, as providers do; `failNextReads`
+ * makes the next reads fail as an unreachable node does. `minedNonces` holds
+ * each sender's mined nonce, and `pending` the transactions the node knows
+ * and has not mined.
  */
 export function createFakeEthereumProvider(
     requests: FakeProofRequest[],
     {
         latestBlock,
+        finalizedBlock = latestBlock,
         maxBlockRange = 2000,
-    }: { latestBlock: number; maxBlockRange?: number }
+    }: { latestBlock: number; finalizedBlock?: number; maxBlockRange?: number }
 ) {
     const queue = NoriProofRequestQueue__factory.createInterface();
     const proofRequested = queue.getEvent('ProofRequested');
-    const state = { latestBlock, failNextReads: 0 };
+    const state = {
+        latestBlock,
+        finalizedBlock,
+        failNextReads: 0,
+        minedNonces: new Map<string, number>(),
+        pending: new Map<string, { from: string; nonce: number }>(),
+    };
     const failIfDown = () => {
         if (state.failNextReads > 0) {
             state.failNextReads--;
@@ -148,7 +225,32 @@ export function createFakeEthereumProvider(
             failIfDown();
             return state.latestBlock;
         },
+        async getBlock(tag: 'latest' | 'finalized' | number) {
+            failIfDown();
+            const number =
+                tag === 'finalized' ? state.finalizedBlock : tag === 'latest' ? state.latestBlock : tag;
+            if (number > state.latestBlock) return null;
+            return {
+                number,
+                hash: '0x' + number.toString(16).padStart(64, '0'),
+                parentHash: '0x' + Math.max(0, number - 1).toString(16).padStart(64, '0'),
+                timestamp: number * 12,
+            };
+        },
         getNetwork: async () => ({ chainId: EXPECTED_CHAIN_ID }),
+        async getTransactionCount(address: string) {
+            failIfDown();
+            return state.minedNonces.get(address) ?? 0;
+        },
+        async getTransaction(hash: string) {
+            failIfDown();
+            const pending = state.pending.get(hash);
+            if (pending) return { hash, ...pending };
+            const mined = requests.find(
+                (request) => transactionHashOf(request.requestId) === hash && request.blockNumber <= state.latestBlock
+            );
+            return mined ? { hash, from: mined.target, nonce: Number(mined.requestId) } : null;
+        },
         async getLogs(filter: {
             fromBlock: number;
             toBlock: number;
@@ -200,7 +302,7 @@ export function createFakeEthereumProvider(
                     gasPrice: 0n,
                     blobGasPrice: null,
                     type: 2,
-                    status: 1,
+                    status: request.status ?? 1,
                     root: null,
                 },
                 fakeProvider
@@ -240,33 +342,43 @@ export function createContiguousBatches(
 
 /**
  * A Solana RPC serving the bridge state and its proof queue batches as the
- * bridge program owns them. `setBatches` replaces them (and the queue cursor,
- * the last batch's output); `failNextReads` makes the next reads fail as a
- * node that never answers does.
+ * bridge program owns them, its finalized slot, and the program's newest
+ * transaction. `setBatches` replaces the batches (and the queue cursor, the
+ * last batch's output) in a new slot, as one program transaction does;
+ * `outputBlockOf` gives each batch's Ethereum output block; `failNextReads`
+ * makes the next reads fail as a node that never answers does, and
+ * `failNextAccountReads` the next account reads only.
  */
 export async function createFakeSolanaRpc(
-    initialBatches: FakeProofQueueBatch[]
+    initialBatches: FakeProofQueueBatch[],
+    { outputBlockOf = (index: number) => 1000 + index }: { outputBlockOf?: (index: number) => number } = {}
 ) {
     const accounts = new Map<string, Uint8Array>();
     const base64 = getBase64Decoder();
-    const [statePda] = await findStatePda({
-        programAddress: TOKEN_PROGRAM_ADDRESS,
-    });
-    const state = { failNextReads: 0, multipleAccountsCalls: 0 };
+    const statePda = await firstValueFrom(stateAddress$(TOKEN_PROGRAM_ADDRESS));
+    // `slot`: the latest finalized slot; `programSlot`: the slot of the program's newest transaction.
+    const state = {
+        failNextReads: 0,
+        failNextAccountReads: 0,
+        multipleAccountsCalls: 0,
+        slot: 1,
+        programSlot: undefined as number | undefined,
+    };
 
     async function setBatches(batches: FakeProofQueueBatch[]) {
+        const pdas = await firstValueFrom(
+            batches.length === 0
+                ? of([])
+                : forkJoin(batches.map((_, index) => proofQueueBatchAddress$(BigInt(index), TOKEN_PROGRAM_ADDRESS)))
+        );
         accounts.clear();
         for (const [index, batch] of batches.entries()) {
-            const [pda] = await findProofQueueBatchPda(
-                BigInt(index),
-                TOKEN_PROGRAM_ADDRESS
-            );
             accounts.set(
-                pda,
+                pdas[index],
                 new Uint8Array(
                     getProofRequestRootEntryEncoder().encode({
                         root: new Uint8Array(32).fill(index % 256),
-                        outputBlockNumber: BigInt(1000 + index),
+                        outputBlockNumber: BigInt(outputBlockOf(index)),
                         ...batch,
                     })
                 )
@@ -288,6 +400,8 @@ export async function createFakeSolanaRpc(
                 })
             )
         );
+        state.slot++;
+        state.programSlot = state.slot;
     }
     await setBatches(initialBatches);
 
@@ -304,9 +418,10 @@ export async function createFakeSolanaRpc(
                   rentEpoch: 0n,
               };
     };
-    const failIfDown = () => {
-        if (state.failNextReads > 0) {
-            state.failNextReads--;
+    const failIfDown = (accountRead = false) => {
+        if (state.failNextReads > 0 || (accountRead && state.failNextAccountReads > 0)) {
+            if (state.failNextReads > 0) state.failNextReads--;
+            else state.failNextAccountReads--;
             throw new SolanaRpcTransportError(
                 'The request got no response.',
                 new TypeError('fetch failed')
@@ -316,38 +431,90 @@ export async function createFakeSolanaRpc(
     const rpc = {
         getAccountInfo: (address: Address) => ({
             send: async () => {
-                failIfDown();
-                return { context: { slot: 1n }, value: toAccount(address) };
+                failIfDown(true);
+                return { context: { slot: BigInt(state.slot) }, value: toAccount(address) };
             },
         }),
         getMultipleAccounts: (addresses: Address[]) => ({
             send: async () => {
-                failIfDown();
+                failIfDown(true);
                 state.multipleAccountsCalls++;
                 if (addresses.length > 100)
                     throw new Error('more than 100 accounts');
                 return {
-                    context: { slot: 1n },
+                    context: { slot: BigInt(state.slot) },
                     value: addresses.map(toAccount),
                 };
+            },
+        }),
+        getSlot: () => ({
+            send: async () => {
+                failIfDown();
+                return BigInt(state.slot);
+            },
+        }),
+        getSignaturesForAddress: (address: Address) => ({
+            send: async () => {
+                failIfDown();
+                return (address === TOKEN_PROGRAM_ADDRESS || address === statePda) && state.programSlot !== undefined
+                    ? [{ signature: `program-transaction-${state.programSlot}`, slot: BigInt(state.programSlot) }]
+                    : [];
             },
         }),
     };
     return { rpc: rpc as unknown as SolanaRpc, state, setBatches };
 }
 
+/** What a fake signer's `sendTransaction` resolves to: the parts of ethers' response the sdk reads. */
+export interface FakeSentTransaction {
+    hash: string;
+    from: string;
+    nonce: number;
+}
+
+/**
+ * An Ethereum wallet transport whose machine's node the test sets
+ * (`state$`): a stand-in for the user's wallet, which only signs. Its
+ * signer is `signer`, which sends a transaction with `sendTransaction`.
+ *
+ * @param node The node its machine starts in (default: `ready`).
+ * @param sendTransaction What the wallet does with a transaction it is asked to send (default: refuses it).
+ * @returns The transport, its states and its signer.
+ */
+export function createFakeWallet(
+    node = 'ready',
+    sendTransaction: (transaction: TransactionRequest) => Promise<FakeSentTransaction> = () =>
+        Promise.reject(new Error('The fake wallet sends nothing.'))
+) {
+    const state$ = new BehaviorSubject<GraphState>({ node, data: {} });
+    const signer = { address: TARGET_A, sendTransaction } as unknown as JsonRpcSigner;
+    const wallet = {
+        connection: { state$ },
+        current: () => ({ getSigner: () => Promise.resolve(signer) }),
+        currentWalletProvider: (): undefined => undefined,
+        chooseWallet: (): void => undefined,
+        switchToExpectedChain: (): void => undefined,
+        reportReadFailed: (): void => undefined,
+        close: (): void => undefined,
+    } as unknown as NonNullable<EthereumTransports['wallet']>;
+    return { wallet, state$, signer };
+}
+
 /**
  * Both connections, each a real connectivity machine over a controllable
  * world: whether each endpoint answers its health checks, and whether the
- * network is online. Reads go through `provider` and `rpc`.
+ * network is online. Reads go through `provider` and `rpc`; Solana's
+ * websocket stays closed, so the Solana changes machine polls `rpc`.
  *
  * @param provider The Ethereum provider reads go through.
  * @param rpc The Solana RPC reads go through.
+ * @param wallet An Ethereum wallet transport; reads still go through `provider`.
  * @returns The connections, and the switches that drive them.
  */
 export function createTestConnections(
     provider: EthereumProvider,
-    rpc: SolanaRpc
+    rpc: SolanaRpc,
+    wallet?: EthereumTransports['wallet']
 ) {
     // `…GoesDownOnReadFailure`: the endpoint stops answering at the moment a
     // read reports failing to reach it, so the re-check finds it down.
@@ -366,16 +533,12 @@ export function createTestConnections(
     const ethereumConnection = httpConnection<EthereumHealth>({
         ...FAST_TIMINGS,
         urls: ['https://ethereum.test'],
-        checkHealth: async (url) => {
-            if (!world.ethereumAnswers)
-                throw new Error('The Ethereum node did not answer.');
-            return {
-                outcome: 'onExpectedNetwork',
-                url,
-                health: { blockNumber: 1 },
-                checkedAt: 0,
-            };
-        },
+        checkHealth: (url) =>
+            defer(() =>
+                world.ethereumAnswers
+                    ? of({ outcome: 'onExpectedNetwork' as const, url, health: { blockNumber: 1 }, checkedAt: 0 })
+                    : throwError(() => new Error('The Ethereum node did not answer.'))
+            ).pipe(subscribeOn(asapScheduler)),
         networkWentOffline$: network$.pipe(
             filter((status) => status === 'offline')
         ),
@@ -391,16 +554,12 @@ export function createTestConnections(
     const solanaConnection = httpConnection<SolanaHealth>({
         ...FAST_TIMINGS,
         urls: ['https://solana.test'],
-        checkHealth: async (url) => {
-            if (!world.solanaAnswers)
-                throw new Error('The Solana node did not answer.');
-            return {
-                outcome: 'onExpectedNetwork',
-                url,
-                health: { slot: 1n },
-                checkedAt: 0,
-            };
-        },
+        checkHealth: (url) =>
+            defer(() =>
+                world.solanaAnswers
+                    ? of({ outcome: 'onExpectedNetwork' as const, url, health: { slot: 1n }, checkedAt: 0 })
+                    : throwError(() => new Error('The Solana node did not answer.'))
+            ).pipe(subscribeOn(asapScheduler)),
         networkWentOffline$: network$.pipe(
             filter((status) => status === 'offline')
         ),
@@ -411,60 +570,46 @@ export function createTestConnections(
         close$: solanaClose$,
     });
 
-    const reportSolanaReadFailed = () => {
-        solanaReadFailures.count++;
-        if (world.solanaGoesDownOnReadFailure) world.solanaAnswers = false;
-        solanaReadFailed$.next();
-    };
-    // As the real transport does: a request that got no response tells the machine.
-    const reportingRpc = new Proxy(rpc, {
-        get: (target, key) => {
-            const method: unknown = Reflect.get(target, key);
-            if (typeof method !== 'function') return method;
-            return (...args: unknown[]) => {
-                const pending = (method as (...a: unknown[]) => { send(): Promise<unknown> }).apply(
-                    target,
-                    args
-                );
-                return {
-                    send: () =>
-                        pending.send().catch((error: unknown) => {
-                            if (error instanceof SolanaRpcTransportError) reportSolanaReadFailed();
-                            throw error;
-                        }),
-                };
-            };
-        },
-    });
-
     const connections: ProofRequestConnections = {
-        ethereum: ethereumChain({
-            http: {
-                connection: ethereumConnection,
-                current: () => provider,
-                reportReadFailed: () => {
-                    ethereumReadFailures.count++;
-                    if (world.ethereumGoesDownOnReadFailure)
-                        world.ethereumAnswers = false;
-                    ethereumReadFailed$.next();
+        ethereum: ethereumChain(
+            {
+                http: {
+                    connection: ethereumConnection,
+                    current: () => provider,
+                    reportReadFailed: () => {
+                        ethereumReadFailures.count++;
+                        if (world.ethereumGoesDownOnReadFailure)
+                            world.ethereumAnswers = false;
+                        ethereumReadFailed$.next();
+                    },
+                    close: () => ethereumClose$.next(),
                 },
-                close: () => ethereumClose$.next(),
+                wallet,
             },
-        }),
-        solana: solanaChain({
-            http: {
-                connection: solanaConnection,
-                current: () => reportingRpc,
-                reportReadFailed: reportSolanaReadFailed,
-                close: () => solanaClose$.next(),
+            // Reads go through http; the wallet only signs.
+            wallet && { calls: ['http'], logs: ['http'] },
+            FAST_POLL_INTERVAL_MS
+        ),
+        solana: solanaChain(
+            {
+                http: {
+                    connection: solanaConnection,
+                    rpcOf: () => rpc,
+                    reportReadFailed: () => {
+                        solanaReadFailures.count++;
+                        if (world.solanaGoesDownOnReadFailure) world.solanaAnswers = false;
+                        solanaReadFailed$.next();
+                    },
+                    close: () => solanaClose$.next(),
+                },
+                websocket: {
+                    connection: { state$: new BehaviorSubject({ node: 'closed', data: {} }) },
+                    socket: new Subject(),
+                    close: (): void => undefined,
+                } as unknown as SolanaTransports['websocket'],
             },
-            // The reading machines never use Solana's websocket: one that stays closed.
-            websocket: {
-                connection: { state$: new BehaviorSubject({ node: 'closed', data: {} }) },
-                socket: new Subject(),
-                close: (): void => undefined,
-            } as unknown as SolanaTransports['websocket'],
-        }),
+            FAST_POLL_INTERVAL_MS
+        ),
     };
     return {
         connections,

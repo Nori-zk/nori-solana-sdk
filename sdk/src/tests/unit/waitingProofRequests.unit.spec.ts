@@ -1,6 +1,6 @@
 import { MAX_BATCH_SIZE } from '../../rpc/nori/commitTimes.js';
 import { sortWaitingProofRequests } from '../../proofRequest/waitingProofRequests.js';
-import { type EnqueuedProofRequest } from '../../rpc/eth/fetchEnqueuedProofRequests.js';
+import { type EnqueuedProofRequest } from '../../rpc/eth/enqueuedProofRequests.js';
 import { TARGET_A, transactionHashOf } from '../testUtils.js';
 
 /** The job Nori's `state.bridge` reported on Sepolia: one epoch of blocks after the last job's. */

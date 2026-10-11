@@ -1,31 +1,22 @@
+import { type Nori } from '../rpc/connection/connections.js';
 import {
-    type Ethereum,
-    forCalls,
-    forLogs,
-    type Nori,
-    type Solana,
-} from '../rpc/connection/connections.js';
-import { proofRequestAge as proofRequestAgeFrom } from '../rpc/eth/proofRequestAge.js';
-import {
-    fetchProofRequestsByTarget as fetchProofRequestsByTargetFrom,
     type ProofRequestsByTargetPage,
     type ProofRequestsByTargetQuery,
-} from '../rpc/eth/fetchProofRequestsByTarget.js';
-import { findRequestIdByTxHash as findRequestIdByTxHashFrom, type ProofRequest } from '../rpc/eth/fetchProofRequest.js';
+} from '../rpc/eth/proofRequestsByTarget.js';
+import { type ProofRequest } from '../rpc/eth/proofRequest.js';
 import {
-    fetchProofRequestCountsByTarget as fetchProofRequestCountsByTargetFrom,
-    fetchProofRequestHistoryPage as fetchProofRequestHistoryPageFrom,
-    type ProofRequestCounts,
     type ProofRequestHistoryAddresses,
     type ProofRequestHistoryPage,
 } from '../proofRequest/fetchProofRequestHistory.js';
 import {
-    fetchProofRequestWitness as fetchProofRequestWitnessFrom,
-    getProofRequestStateSnapshot as getProofRequestStateSnapshotFrom,
+    type ProofAvailableProofRequestSnapshot,
     type ProofRequestStateSnapshot,
     type ProofRequestStateSnapshotRequest,
+    type ProofRequestWitnesses,
+    type UndeterminedProofRequestSnapshot,
+    type UnprocessedProofRequestSnapshot,
+    type VerifiedRequestWitness,
 } from '../proofRequest/getProofRequestStateSnapshot.js';
-import { type ProofRequestStateGraph } from '../proofRequest/proofRequest.js';
 import { createUnprocessedProofRequestStateMachine as createUnprocessedProofRequestStateMachineFrom } from '../proofRequest/unprocessed.impl.js';
 import { type RequestWitness } from '@nori-zk/ethereum-solana-proof-queue-utils-glam';
 
@@ -45,8 +36,12 @@ export {
 export {
     createProofRequestHistoryMachine,
     type ProofRequestHistoryQuery,
-    type ReadRetryBackoff,
 } from '../proofRequest/proofRequestHistory.impl.js';
+export {
+    ProofRequestWitnessGraph,
+    type ProofRequestWitnessState,
+} from '../proofRequest/proofRequestWitness.js';
+export { createProofRequestWitnessMachine } from '../proofRequest/proofRequestWitness.impl.js';
 export {
     LatestProofRequestsGraph,
     type LatestProofRequestsState,
@@ -55,6 +50,25 @@ export {
     createLatestProofRequestsMachine,
     type LatestProofRequestsQuery,
 } from '../proofRequest/latestProofRequests.impl.js';
+export {
+    ProofRequestCountsGraph,
+    type ProofRequestCountsState,
+} from '../proofRequest/proofRequestCounts.js';
+export {
+    createProofRequestCountsMachine,
+    type ProofRequestCountsQuery,
+} from '../proofRequest/proofRequestCounts.impl.js';
+export {
+    ProofRequestBlockTimeGraph,
+    type ProofRequestBlockTimeState,
+} from '../proofRequest/proofRequestBlockTime.js';
+export { createProofRequestBlockTimeMachine } from '../proofRequest/proofRequestBlockTime.impl.js';
+export {
+    ProofRequestOfTransactionGraph,
+    type ProofRequestOfTransactionState,
+} from '../proofRequest/proofRequestOfTransaction.js';
+export { createProofRequestOfTransactionMachine } from '../proofRequest/proofRequestOfTransaction.impl.js';
+export type { ProofRequestCounts } from '../proofRequest/fetchProofRequestHistory.js';
 export {
     UnprocessedProofRequestStateGraph,
     type UnprocessedProofRequestStateNodeUnion,
@@ -76,19 +90,23 @@ export {
 export type {
     ProofRequestHistoryCursor,
     ProofRequestHistoryOrder,
-} from '../rpc/eth/fetchProofRequestsByTarget.js';
+} from '../rpc/eth/proofRequestsByTarget.js';
 export type { ProofRequestHistoryEntry } from '../proofRequest/fetchProofRequestHistory.js';
 export type { RequestLeaf } from '@nori-zk/ethereum-solana-proof-queue-utils-glam';
 export type {
+    ProofAvailableProofRequestSnapshot,
     ProofRequest,
-    ProofRequestCounts,
     ProofRequestHistoryAddresses,
     ProofRequestHistoryPage,
     ProofRequestsByTargetPage,
     ProofRequestsByTargetQuery,
     ProofRequestStateSnapshot,
     ProofRequestStateSnapshotRequest,
+    ProofRequestWitnesses,
     RequestWitness,
+    UndeterminedProofRequestSnapshot,
+    UnprocessedProofRequestSnapshot,
+    VerifiedRequestWitness,
 };
 
 /**
@@ -103,113 +121,4 @@ export function createUnprocessedProofRequestStateMachine(
     nori: Nori
 ) {
     return createUnprocessedProofRequestStateMachineFrom(proofRequestBlockNumber, nori.websocket);
-}
-
-/**
- * Where a proof request is, read once from Ethereum and Solana.
- *
- * @param chains The Ethereum and Solana chains.
- * @param request The addresses and the transaction that enqueued the request.
- * @returns The unprocessed or proof available state data.
- */
-export async function getProofRequestStateSnapshot(
-    { ethereum, solana }: { ethereum: Ethereum; solana: Solana },
-    request: ProofRequestStateSnapshotRequest
-): Promise<ProofRequestStateSnapshot> {
-    const rpc = await solana.http.ready();
-    return forCalls(ethereum, getProofRequestStateSnapshotFrom, rpc, request);
-}
-
-/**
- * The witness of a proof request whose proof is available.
- *
- * @param ethereum The Ethereum chain.
- * @param proofAvailable The proof available state data.
- * @param proofQueueAddress The Ethereum `NoriProofRequestQueue` address.
- * @returns The request's leaf, its bottom-up path and the batch root.
- */
-export function getProofRequestWitness(
-    ethereum: Ethereum,
-    proofAvailable: (typeof ProofRequestStateGraph.nodes)['proofAvailable'],
-    proofQueueAddress: string
-): Promise<RequestWitness> {
-    return forLogs(ethereum, fetchProofRequestWitnessFrom, proofAvailable, proofQueueAddress);
-}
-
-/**
- * One page of a submitting address's proof requests, each with where it is now.
- *
- * @param chains The Ethereum and Solana chains.
- * @param addresses The queue and program addresses.
- * @param query The submitting address, block range, order, page size and cursor.
- * @returns The page's entries, its continuation cursor, and whether the range is exhausted.
- */
-export async function getProofRequestHistoryPage(
-    { ethereum, solana }: { ethereum: Ethereum; solana: Solana },
-    addresses: ProofRequestHistoryAddresses,
-    query: ProofRequestsByTargetQuery
-): Promise<ProofRequestHistoryPage> {
-    const rpc = await solana.http.ready();
-    return forLogs(ethereum, fetchProofRequestHistoryPageFrom, rpc, addresses, query);
-}
-
-/**
- * How many proof requests a submitting address made over a block range, and
- * how many have a proof available.
- *
- * @param chains The Ethereum and Solana chains.
- * @param addresses The queue and program addresses.
- * @param query The submitting address and block range.
- * @returns The total, proven and unprocessed counts.
- */
-export async function getProofRequestCountsByTarget(
-    { ethereum, solana }: { ethereum: Ethereum; solana: Solana },
-    addresses: ProofRequestHistoryAddresses,
-    query: Pick<ProofRequestsByTargetQuery, 'target' | 'fromBlock' | 'toBlock' | 'maxBlockRangePerQuery'>
-): Promise<ProofRequestCounts> {
-    const rpc = await solana.http.ready();
-    return forLogs(ethereum, fetchProofRequestCountsByTargetFrom, rpc, addresses, query);
-}
-
-/**
- * One page of a submitting address's proof requests.
- *
- * @param ethereum The Ethereum chain.
- * @param proofQueueAddress The `NoriProofRequestQueue` address.
- * @param query The submitting address, block range, order, page size and cursor.
- * @returns The page, its continuation cursor, and whether the range is exhausted.
- */
-export function getProofRequestsByTarget(
-    ethereum: Ethereum,
-    proofQueueAddress: string,
-    query: ProofRequestsByTargetQuery
-): Promise<ProofRequestsByTargetPage> {
-    return forLogs(ethereum, fetchProofRequestsByTargetFrom, proofQueueAddress, query);
-}
-
-/**
- * The proof request a transaction enqueued.
- *
- * @param ethereum The Ethereum chain.
- * @param proofQueueAddress The `NoriProofRequestQueue` address.
- * @param proofRequestTxHash The transaction that enqueued it.
- * @returns The request's id and block.
- */
-export function getRequestIdByTxHash(
-    ethereum: Ethereum,
-    proofQueueAddress: string,
-    proofRequestTxHash: string
-): Promise<ProofRequest> {
-    return forCalls(ethereum, findRequestIdByTxHashFrom, proofQueueAddress, proofRequestTxHash);
-}
-
-/**
- * How long ago a proof request's block was mined, in seconds.
- *
- * @param ethereum The Ethereum chain.
- * @param blockNumber The block the request was enqueued in.
- * @returns Its age in seconds.
- */
-export function getProofRequestAge(ethereum: Ethereum, blockNumber: bigint): Promise<number> {
-    return forCalls(ethereum, proofRequestAgeFrom, blockNumber);
 }

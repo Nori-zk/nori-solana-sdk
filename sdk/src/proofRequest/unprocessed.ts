@@ -1,13 +1,13 @@
 import { define, type StateUnion } from '@yaw-rx/ystate';
 import type { ObservedValueOf } from 'rxjs';
 import type {
-    getBridgeStateTopic$,
-    getBridgeTimingsTopic$,
-    getEthStateTopic$,
+    bridgeStateTopic$,
+    bridgeTimingsTopic$,
+    ethStateTopic$,
 } from '../rpc/nori/topics.js';
 import type { BridgeProofRequestProcessingStatus } from '../rpc/nori/proofRequest.js';
 
-type BridgeState = ObservedValueOf<ReturnType<typeof getBridgeStateTopic$>>;
+type BridgeState = ObservedValueOf<ReturnType<typeof bridgeStateTopic$>>;
 
 export type UnprocessedProofRequestStateData = BridgeState & {
     time_remaining_sec: number;
@@ -101,7 +101,7 @@ export type UnprocessedProofRequestStateNodeUnion = StateUnion<
 >;
 
 export type UnprocessedProofRequestTopics = {
-    ethStateTopic$: ReturnType<typeof getEthStateTopic$>;
-    bridgeStateTopic$: ReturnType<typeof getBridgeStateTopic$>;
-    bridgeTimingsTopic$: ReturnType<typeof getBridgeTimingsTopic$>;
+    ethStateTopic$: ReturnType<typeof ethStateTopic$>;
+    bridgeStateTopic$: ReturnType<typeof bridgeStateTopic$>;
+    bridgeTimingsTopic$: ReturnType<typeof bridgeTimingsTopic$>;
 };

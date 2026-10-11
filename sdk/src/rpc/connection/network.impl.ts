@@ -1,13 +1,16 @@
 import {
+    catchError,
+    defer,
     EMPTY,
     exhaustMap,
     filter,
-    from,
+    first,
     fromEvent,
     interval,
     map,
     merge,
     type Observable,
+    of,
     share,
     Subject,
 } from 'rxjs';
@@ -43,23 +46,27 @@ export interface Probe {
  *
  * @param urls The endpoints to try.
  * @param timeoutMs How long each may take.
- * @returns Whether one answered, and when the probe finished.
+ * @returns Whether one answered, and when the probe finished, once.
  */
-async function probe(urls: string[], timeoutMs: number): Promise<Probe> {
-    const answered = await Promise.any(
-        urls.map((url) =>
-            fetch(url, {
-                method: 'GET',
-                mode: 'no-cors',
-                cache: 'no-store',
-                signal: AbortSignal.timeout(timeoutMs),
-            })
+function probe$(urls: string[], timeoutMs: number): Observable<Probe> {
+    return merge(
+        ...urls.map((url) =>
+            defer(() =>
+                fetch(url, {
+                    method: 'GET',
+                    mode: 'no-cors',
+                    cache: 'no-store',
+                    signal: AbortSignal.timeout(timeoutMs),
+                })
+            ).pipe(
+                map(() => true),
+                catchError(() => of(false))
+            )
         )
-    ).then(
-        () => true,
-        () => false
+    ).pipe(
+        first((answered) => answered, false),
+        map((answered) => ({ answered, at: Date.now() }))
     );
-    return { answered, at: Date.now() };
 }
 
 /**
@@ -82,8 +89,7 @@ function browserEvent$(type: 'online' | 'offline'): Observable<number> {
  * browser or in Node.
  *
  * @param options The endpoints to probe and how often.
- * @returns
- *   - `network`: the running machine.
+ * @returns The running machine. Its control:
  *   - `close()`: moves the machine to `closed`.
  */
 export function createNetworkMachine({
@@ -92,13 +98,13 @@ export function createNetworkMachine({
     probeTimeoutMs = 5000,
 }: NetworkOptions = {}) {
     const close$ = new Subject<void>();
-    const probe$ = () => from(probe(probeUrls, probeTimeoutMs));
+    const probeOnce$ = () => probe$(probeUrls, probeTimeoutMs);
 
     // `checking` probes once; its two outcome edges share that probe.
-    const firstProbe$ = probe$().pipe(share());
+    const firstProbe$ = probeOnce$().pipe(share());
     // `online` probes every interval; its two outcome edges share each probe.
     const backgroundProbe$ = interval(probeIntervalMs).pipe(
-        exhaustMap(probe$),
+        exhaustMap(probeOnce$),
         share()
     );
 
@@ -129,7 +135,7 @@ export function createNetworkMachine({
         connectivityRestored: {
             $: () =>
                 merge(interval(probeIntervalMs), browserEvent$('online')).pipe(
-                    exhaustMap(probe$),
+                    exhaustMap(probeOnce$),
                     filter(({ answered }) => answered)
                 ),
             next: ({ at }) => ({ checkedAt: at }),
@@ -141,8 +147,8 @@ export function createNetworkMachine({
     });
 
     const network = machine.close().start('checking');
-    return { network, close: () => close$.next() };
+    return Object.assign(network, { close: () => close$.next() });
 }
 
-/** The running network machine and its `close()`. */
+/** The running network machine, with `close()`. */
 export type NetworkMachine = ReturnType<typeof createNetworkMachine>;

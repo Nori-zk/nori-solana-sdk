@@ -1,194 +1,77 @@
 import { define, type StateUnion } from '@yaw-rx/ystate';
-import type { ConnectionName } from './connectedRead.js';
+import { readThroughConnectionsOf } from '../rpc/connection/readThroughConnections.js';
+import { transactionFollowOf } from '../transaction/transactionFollow.js';
+import type {
+    ProofAvailableProofRequestSnapshot,
+    UndeterminedProofRequestSnapshot,
+    UnprocessedProofRequestSnapshot,
+} from './getProofRequestStateSnapshot.js';
 import { ProofRequestState } from './types.js';
 
-/** What is known of a request the bridge has not proven yet. */
-const unprocessedRequest = {
-    state: ProofRequestState.Unprocessed as typeof ProofRequestState.Unprocessed,
-    requestId: 0n as bigint,
-    requestBlockNumber: 0n as bigint,
-    queueCursor: 0n as bigint,
-    proofQueueBatchCount: 0n as bigint,
-};
+const { nodes, edges } = readThroughConnectionsOf({
+    proofRequestTxHash: '',
+    transaction: transactionFollowOf(''),
+    snapshot: { state: ProofRequestState.Undetermined } as
+        | UndeterminedProofRequestSnapshot
+        | UnprocessedProofRequestSnapshot,
+});
 
 /**
  * Follows one Ethereum proof request until a committed proof queue batch on
- * Solana covers it, reading through the Ethereum provider and Solana RPC
- * connectivity machines. Nothing is a dead end: lost connections are waited
- * for and failures retry themselves.
+ * Solana covers it: its snapshot, read through the connections
+ * (`readThroughConnectionsOf`), until the proof is available.
+ * `proofRequestTxHash`, the transaction that enqueued the request, is its
+ * starting data, carried by every node.
  *
- * - `undetermined` looks the request up from the transaction that enqueued
- *   it, on entry and then every poll interval or recheck signal. A
- *   transaction that is not mined yet is not a failure: it keeps looking.
- *   Its outcomes race on one shared lookup: `unprocessed`,
- *   `proofAvailable`, a lost connection, or a failure.
- * - `unprocessed` checks the bridge on entry and then every poll interval or
- *   recheck signal, until a committed batch covers the request.
- * - A read that fails to reach a connection reports it to that connection,
- *   which re-checks itself, and the machine stays where it is until the
- *   check settles: a connection that turns out to be down is
- *   `connectionLost`; one that passes straight back to `ready` means the read
- *   itself failed: `readFailedOnHealthyConnection`.
- * - `waitingForConnection…` names the connections it waits on in
- *   `waitingOn`, updated as they change, and resumes where it was once both
- *   are `ready`. The lost and failed nodes are split by where they resume,
- *   because an edge's target is fixed.
- * - `failed…` reads again by itself after a wait that doubles with each
- *   consecutive failure (`failedReads`), or at once on `retry`. A read that
- *   succeeds resets `failedReads`.
- * - `proofAvailable` is terminal: once a batch covers the request it stays
- *   covered (batches are append-only). `closed` is terminal too.
+ * - `loading` looks the request up from the transaction that enqueued it.
+ *   A transaction that is not mined yet is not a failure: the snapshot
+ *   stays `undetermined`, and `transaction` holds the transaction as the
+ *   last read found it (`transactionFollow$`).
+ * - `current` holds the snapshot while no batch covers the request. An
+ *   `undetermined` one is looked up again, and an `unprocessed` one read
+ *   again (`refreshing`), every poll interval or recheck signal.
+ * - A read that finds a committed batch covering the request moves to
+ *   `proofAvailable` (`discoveredProofAvailable` from `loading`,
+ *   `proofRequestCommitted` from `refreshing`), which holds the snapshot
+ *   with that batch. It is terminal: batches are append-only, so the request
+ *   stays covered.
+ * - The enqueuing transaction never mined: `transactionReplaced` once its
+ *   sender's mined nonce moved past its own, `transactionDropped` once the
+ *   node has not known it for the blocks allowed. Both are terminal: the
+ *   request was never enqueued.
+ * - `closed` is terminal too.
  */
 export const ProofRequestStateGraph = define({
     nodes: {
-        undetermined: { failedReads: 0 },
-        unprocessed: { ...unprocessedRequest, failedReads: 0 },
+        ...nodes,
         proofAvailable: {
-            state: ProofRequestState.ProofAvailable as typeof ProofRequestState.ProofAvailable,
-            requestId: 0n as bigint,
-            requestBlockNumber: 0n as bigint,
-            queueCursor: 0n as bigint,
-            proofQueueBatchIndex: 0n as bigint,
-            proofQueueBatchAddress: '' as string, // base58 proof queue batch PDA
-            root: '' as string, // 0x-prefixed batch root
-            inputQueueCursor: 0n as bigint,
-            outputQueueCursor: 0n as bigint,
-            outputBlockNumber: 0n as bigint,
-            previousOutputBlockNumber: -1n as bigint, // sentinel: no previous proof queue batch (first-ever batch)
-            indexInBatch: 0n as bigint,
+            proofRequestTxHash: '',
+            snapshot: {
+                state: ProofRequestState.ProofAvailable,
+                requestId: 0n,
+                requestBlockNumber: 0n,
+                queueCursor: 0n,
+                proofQueueBatchIndex: 0n,
+                proofQueueBatchAddress: '',
+                root: '',
+                inputQueueCursor: 0n,
+                outputQueueCursor: 0n,
+                outputBlockNumber: 0n,
+                previousOutputBlockNumber: -1n, // sentinel: no previous proof queue batch (first-ever batch)
+                indexInBatch: 0n,
+            } as ProofAvailableProofRequestSnapshot,
         },
-        waitingForConnectionWhileUndetermined: {
-            failedReads: 0,
-            waitingOn: [] as ConnectionName[],
-        },
-        waitingForConnectionWhileUnprocessed: {
-            ...unprocessedRequest,
-            failedReads: 0,
-            waitingOn: [] as ConnectionName[],
-        },
-        failedWhileUndetermined: { failedReads: 0, error: '' },
-        failedWhileUnprocessed: { ...unprocessedRequest, failedReads: 0, error: '' },
-        closed: {},
+        transactionReplaced: { proofRequestTxHash: '', transaction: transactionFollowOf('') },
+        transactionDropped: { proofRequestTxHash: '', transaction: transactionFollowOf('') },
     },
     edges: {
-        discoveredUnprocessed: {
-            from: 'undetermined',
-            to: 'unprocessed',
-            on: 'checkWhetherProofRequestIsUnprocessed.next',
-        },
-        discoveredProofAvailable: {
-            from: 'undetermined',
-            to: 'proofAvailable',
-            on: 'checkWhetherProofIsAvailable.next',
-        },
-        proofRequestCommitted: {
-            from: 'unprocessed',
-            to: 'proofAvailable',
-            on: 'checkWhetherUnprocessedProofRequestIsCommitted.next',
-        },
-
-        connectionLostWhileUndetermined: {
-            from: 'undetermined',
-            to: 'waitingForConnectionWhileUndetermined',
-            on: 'connectionLost.next',
-        },
-        connectionsChangedWhileUndetermined: {
-            from: 'waitingForConnectionWhileUndetermined',
-            to: 'waitingForConnectionWhileUndetermined',
-            on: 'connectionsChanged.next',
-        },
-        connectionRestoredWhileUndetermined: {
-            from: 'waitingForConnectionWhileUndetermined',
-            to: 'undetermined',
-            on: 'connectionRestored.next',
-        },
-        readFailedOnHealthyConnectionWhileUndetermined: {
-            from: 'undetermined',
-            to: 'failedWhileUndetermined',
-            on: 'readFailedOnHealthyConnection.next',
-        },
-        readFailedWhileUndetermined: {
-            from: 'undetermined',
-            to: 'failedWhileUndetermined',
-            on: 'readFailed.next',
-        },
-        retryStartedWhileUndetermined: {
-            from: 'failedWhileUndetermined',
-            to: 'undetermined',
-            on: 'retryDue.next',
-        },
-        retryWhileUndetermined: {
-            from: 'failedWhileUndetermined',
-            to: 'undetermined',
-            on: 'retry.next',
-        },
-
-        connectionLostWhileUnprocessed: {
-            from: 'unprocessed',
-            to: 'waitingForConnectionWhileUnprocessed',
-            on: 'connectionLost.next',
-        },
-        connectionsChangedWhileUnprocessed: {
-            from: 'waitingForConnectionWhileUnprocessed',
-            to: 'waitingForConnectionWhileUnprocessed',
-            on: 'connectionsChanged.next',
-        },
-        connectionRestoredWhileUnprocessed: {
-            from: 'waitingForConnectionWhileUnprocessed',
-            to: 'unprocessed',
-            on: 'connectionRestored.next',
-        },
-        readFailedOnHealthyConnectionWhileUnprocessed: {
-            from: 'unprocessed',
-            to: 'failedWhileUnprocessed',
-            on: 'readFailedOnHealthyConnection.next',
-        },
-        readFailedWhileUnprocessed: {
-            from: 'unprocessed',
-            to: 'failedWhileUnprocessed',
-            on: 'readFailed.next',
-        },
-        retryStartedWhileUnprocessed: {
-            from: 'failedWhileUnprocessed',
-            to: 'unprocessed',
-            on: 'retryDue.next',
-        },
-        retryWhileUnprocessed: {
-            from: 'failedWhileUnprocessed',
-            to: 'unprocessed',
-            on: 'retry.next',
-        },
-
-        closedWhileUndetermined: {
-            from: 'undetermined',
-            to: 'closed',
-            on: 'close.next',
-        },
-        closedWhileUnprocessed: {
-            from: 'unprocessed',
-            to: 'closed',
-            on: 'close.next',
-        },
-        closedWhileWaitingForConnectionWhileUndetermined: {
-            from: 'waitingForConnectionWhileUndetermined',
-            to: 'closed',
-            on: 'close.next',
-        },
-        closedWhileWaitingForConnectionWhileUnprocessed: {
-            from: 'waitingForConnectionWhileUnprocessed',
-            to: 'closed',
-            on: 'close.next',
-        },
-        closedWhileFailedWhileUndetermined: {
-            from: 'failedWhileUndetermined',
-            to: 'closed',
-            on: 'close.next',
-        },
-        closedWhileFailedWhileUnprocessed: {
-            from: 'failedWhileUnprocessed',
-            to: 'closed',
-            on: 'close.next',
-        },
+        ...edges,
+        discoveredProofAvailable: { from: 'loading', to: 'proofAvailable', on: 'proven.next' },
+        proofRequestCommitted: { from: 'refreshing', to: 'proofAvailable', on: 'proven.next' },
+        replacedOnFirstRead: { from: 'loading', to: 'transactionReplaced', on: 'transactionReplaced.next' },
+        replacedOnRefresh: { from: 'refreshing', to: 'transactionReplaced', on: 'transactionReplaced.next' },
+        droppedOnFirstRead: { from: 'loading', to: 'transactionDropped', on: 'transactionDropped.next' },
+        droppedOnRefresh: { from: 'refreshing', to: 'transactionDropped', on: 'transactionDropped.next' },
     },
 });
 

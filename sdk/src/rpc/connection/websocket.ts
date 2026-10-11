@@ -44,6 +44,11 @@ export interface ReconnectingWebSocketConfig<T>
     heartbeat?: WebSocketHeartbeat<T>;
     /** How many attempts may fail in a row before giving up (default: no limit). */
     maxFailedAttempts?: number;
+    /**
+     * The address to connect to, as it changes: each connection takes the
+     * latest, and a new one reconnects an open socket (default: `url`).
+     */
+    url$?: Observable<string>;
 }
 
 /** A running WebSocket connection machine. */
@@ -82,13 +87,24 @@ export class ReconnectingWebSocketSubject<T> extends Subject<T> {
     private subscriptions = new Subscription();
     private socket: WebSocketSubject<T> | null = null;
     private config: ReconnectingWebSocketConfig<T>;
+    /** The address the next connection opens: `url`, then the latest from `url$`. */
+    private url: string;
 
     constructor(
         config: ReconnectingWebSocketConfig<T>,
-        network: NetworkMachine['network']
+        network: NetworkMachine
     ) {
         super();
         this.config = config;
+        this.url = config.url;
+        if (config.url$)
+            this.subscriptions.add(
+                config.url$.pipe(distinctUntilChanged()).subscribe((url) => {
+                    if (url === this.url) return;
+                    this.url = url;
+                    this.forceReconnect();
+                })
+            );
         const started$ = new ReplaySubject<StartedMachine<WebSocketConnectionState>>(1);
         this.websocketConnection = createWebSocketConnectionMachine({
             ...config,
@@ -144,7 +160,7 @@ export class ReconnectingWebSocketSubject<T> extends Subject<T> {
     /** Drops the open socket and reconnects. */
     public forceReconnect(): void {
         if (this.socket !== null)
-            this.dropped$.next({ error: `Reconnect requested for ${this.config.url}.` });
+            this.dropped$.next({ error: `Reconnect requested for ${this.url}.` });
     }
 
     /** Connects again after giving up. */
@@ -160,10 +176,12 @@ export class ReconnectingWebSocketSubject<T> extends Subject<T> {
      */
     private _connect() {
         return new Observable<never>(() => {
-            const { heartbeat, retryBackoff, healthCheckTimeoutMs, maxFailedAttempts, ...wsConfig } =
+            const { heartbeat, retryBackoff, healthCheckTimeoutMs, maxFailedAttempts, url$, ...socketConfig } =
                 this.config;
             void retryBackoff;
             void maxFailedAttempts;
+            void url$;
+            const wsConfig = { ...socketConfig, url: this.url };
             const timings = resolveHealthCheckTimings({ healthCheckTimeoutMs });
             let isOpen = false;
             let settled = false;
@@ -307,7 +325,7 @@ export class ReconnectingWebSocketSubject<T> extends Subject<T> {
  */
 export function websocketConnection<T>(
     config: ReconnectingWebSocketConfig<T>,
-    network: NetworkMachine['network']
+    network: NetworkMachine
 ) {
     const socket = new ReconnectingWebSocketSubject<T>(config, network);
     return {
