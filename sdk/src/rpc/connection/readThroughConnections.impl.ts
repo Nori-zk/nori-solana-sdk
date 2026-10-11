@@ -27,6 +27,7 @@ import {
     type EdgeDef,
     type IncidenceGraphSetMixin,
     type NodeData,
+    type RunningMachine,
     type StateUnion,
     type TransitionDef,
     type TransitionNames,
@@ -88,6 +89,8 @@ export interface ReadThroughConnectionsOptions<TData extends object, TPrevious e
     connections: ProofRequestConnections;
     /** The machine's states, from `stateOf$`. */
     state$: Observable<GraphState>;
+    /** The running machine, once started: the subscriber its reads take their turns at the endpoints as. */
+    started$: Observable<RunningMachine>;
     /**
      * The read, given the data the state holds (the previous value; the
      * defaults on a first read) and whether it is `loading` or `refreshing`.
@@ -185,8 +188,15 @@ export function readThroughConnectionsTransitions<TData extends object, TPreviou
                     map((waitingOn) => ({ outcome: 'connectionLost' as const, waitingOn }))
                 ),
                 following$.pipe(
-                    switchMap(() =>
-                        readThroughConnections$(connections, (clients) => read(clients, previous, at), kind, needs)
+                    switchMap(() => options.started$.pipe(take(1))),
+                    switchMap((machine) =>
+                        readThroughConnections$(
+                            connections,
+                            machine,
+                            (clients) => read(clients, previous, at),
+                            kind,
+                            needs
+                        )
                     )
                 )
             ).pipe(
@@ -349,15 +359,17 @@ export type ReadThroughConnectionsMachineOptions<
     TData extends object,
     TNodes extends Record<string, NodeData> = Record<string, NodeData>,
     TEdges extends Record<string, EdgeDef<TNodes>> = Record<string, EdgeDef<TNodes>>,
-> = Omit<ReadThroughConnectionsOptions<TData, TNodes['current']>, 'state$' | 'retry$' | 'close$'> & {
+> = Omit<ReadThroughConnectionsOptions<TData, TNodes['current']>, 'state$' | 'started$' | 'retry$' | 'close$'> & {
     /**
      * The graph's own transitions beside the shared ones, given the shared
-     * read's outcomes and the machine's states, typed by the graph; each
-     * named by a transition the graph's edges move on.
+     * read's outcomes, the machine's states, typed by the graph, and the
+     * running machine, the subscriber the requests they make take their
+     * turns as; each named by a transition the graph's edges move on.
      */
     ownTransitions?: (
         read$: Observable<ReadThroughConnectionsRead<TData, TNodes['current']>>,
-        state$: Observable<StateUnion<TNodes>>
+        state$: Observable<StateUnion<TNodes>>,
+        started$: Observable<RunningMachine>
     ) => Partial<Record<TransitionNames<TEdges>, TransitionDef>>;
     /** Running machines this one owns, e.g. the chain changes machine its `refreshOn` gates on; its `close()` closes them too. */
     owns?: { close(): void }[];
@@ -392,8 +404,15 @@ export function startReadThroughConnectionsMachine<
     const retry$ = new Subject<void>();
     const close$ = new Subject<void>();
     const started$ = new ReplaySubject<StartedMachine<GraphState>>(1);
+    const running$ = new ReplaySubject<RunningMachine>(1);
     const state$ = stateOf$(started$);
-    const { transitions, read$ } = readThroughConnectionsTransitions<TData, TNodes['current']>({ ...options, state$, retry$, close$ });
+    const { transitions, read$ } = readThroughConnectionsTransitions<TData, TNodes['current']>({
+        ...options,
+        state$,
+        started$: running$,
+        retry$,
+        close$,
+    });
     const { node, data } = options.start ?? { node: 'loading', data: undefined };
     const entry = node as Extract<keyof TNodes, string>;
 
@@ -402,12 +421,13 @@ export function startReadThroughConnectionsMachine<
         .implement({
             ...transitions,
             // The machine's states are the graph's.
-            ...options.ownTransitions?.(read$, state$ as Observable<StateUnion<TNodes>>),
+            ...options.ownTransitions?.(read$, state$ as Observable<StateUnion<TNodes>>, running$),
         } as Parameters<typeof graph.implement>[0])
         .close()
         .start(entry, undefined, data === undefined ? undefined : ({ [entry]: data } as { [K in typeof entry]?: Widen<TNodes[K]> }));
     // Its states are the graph's (`StateUnion<TNodes>`), whose node names are strings.
     started$.next(machine as StartedMachine<GraphState>);
+    running$.next(machine as RunningMachine);
 
     return Object.assign(machine, {
         retry: () => retry$.next(),

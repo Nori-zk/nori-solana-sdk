@@ -1,5 +1,14 @@
 import { getBase64Decoder, type Address } from '@solana/kit';
-import { getAddress, type JsonRpcSigner, Log, TransactionReceipt, type TransactionRequest, zeroPadValue } from 'ethers';
+import { type RunningMachine } from '@yaw-rx/ystate';
+import {
+    getAddress,
+    type JsonRpcProvider,
+    type JsonRpcSigner,
+    Log,
+    TransactionReceipt,
+    type TransactionRequest,
+    zeroPadValue,
+} from 'ethers';
 import { type GraphState } from '../utils/machines.js';
 import {
     asapScheduler,
@@ -9,6 +18,7 @@ import {
     firstValueFrom,
     forkJoin,
     map,
+    NEVER,
     type Observable,
     of,
     skip,
@@ -31,6 +41,7 @@ import { proofQueueBatchAddress$, stateAddress$ } from '../rpc/solana/programAdd
 import { SolanaRpcTransportError } from '../rpc/solana/errors.js';
 import type { SolanaHealth, SolanaRpc } from '../rpc/solana/solanaHttp.js';
 import type { EthereumHealth } from '../rpc/eth/ethereumHttp.js';
+import { type GrantedSend, type RequestResult } from '../rpc/connection/connectionGrants.js';
 import { httpConnection } from '../rpc/connection/httpConnection.impl.js';
 import {
     ethereumChain,
@@ -52,8 +63,21 @@ export const FAST_TIMINGS = {
     retryBackoff: { initialDelayMs: 20, maxDelayMs: 80 },
 };
 
+/** The URL of the test connections' Ethereum endpoint. */
+export const ETHEREUM_URL = 'https://ethereum.test';
+
 /** How often the test chains poll while no transport can subscribe. */
 export const FAST_POLL_INTERVAL_MS = 50;
+
+/**
+ * A running machine with no states of its own, for a test that runs
+ * requests directly to take their turns as.
+ *
+ * @returns The machine.
+ */
+export function testSubscriber(): RunningMachine {
+    return { status$: NEVER, state$: NEVER, event$: NEVER };
+}
 
 /**
  * Waits until a running machine is in `node`, failing after `timeoutMs`.
@@ -465,6 +489,101 @@ export async function createFakeSolanaRpc(
     return { rpc: rpc as unknown as SolanaRpc, state, setBatches };
 }
 
+/** What a test endpoint over its rate throws: it turned the request away for too many requests. */
+export class TooManyRequestsError extends Error {
+    constructor() {
+        super('Too many requests.');
+        this.name = 'TooManyRequestsError';
+    }
+}
+
+/**
+ * An endpoint's rate: `admit()` lets a request through while fewer than
+ * `perSecond()` were let through in the last second, and throws
+ * `TooManyRequestsError` otherwise, as a public RPC answers 429.
+ *
+ * @param perSecond How many requests a second it takes, read on each request.
+ * @returns `admit()`, and how many requests it turned away.
+ */
+export function rateOf(perSecond: () => number) {
+    const admittedAt: number[] = [];
+    const counts = { turnedAway: 0 };
+    const admit = () => {
+        const now = Date.now();
+        while (admittedAt.length > 0 && now - admittedAt[0] >= 1000) admittedAt.shift();
+        if (admittedAt.length >= perSecond()) {
+            counts.turnedAway++;
+            throw new TooManyRequestsError();
+        }
+        admittedAt.push(now);
+    };
+    return { admit, counts };
+}
+
+/** Whether a test endpoint turned a request away: it threw `TooManyRequestsError`. */
+const turnedAwayByTestEndpoint = (result: RequestResult<unknown>) =>
+    'failed' in result && result.failed instanceof TooManyRequestsError;
+
+/**
+ * The fake Ethereum provider as a client over a connection's grants: every
+ * call takes its subscriber's turn and passes the endpoint's rate.
+ *
+ * @param provider The fake provider.
+ * @param send$ Sends a request on its subscriber's turn.
+ * @param admit The endpoint's rate.
+ * @returns The client.
+ */
+function grantedFakeProvider(provider: EthereumProvider, send$: GrantedSend, admit: () => void): JsonRpcProvider {
+    return new Proxy(provider, {
+        get: (target, key) => {
+            const value: unknown = Reflect.get(target, key);
+            return typeof value === 'function'
+                ? (...args: unknown[]) =>
+                      firstValueFrom(
+                          send$(() =>
+                              defer(() => {
+                                  admit();
+                                  return value.apply(target, args) as Promise<unknown>;
+                              })
+                          )
+                      )
+                : value;
+        },
+    }) as unknown as JsonRpcProvider;
+}
+
+/**
+ * The fake Solana RPC as a client over a connection's grants: every
+ * request's `send()` takes its subscriber's turn and passes the endpoint's rate.
+ *
+ * @param rpc The fake RPC.
+ * @param send$ Sends a request on its subscriber's turn.
+ * @param admit The endpoint's rate.
+ * @returns The client.
+ */
+function grantedFakeRpc(rpc: SolanaRpc, send$: GrantedSend, admit: () => void): SolanaRpc {
+    return new Proxy(rpc, {
+        get: (target, key) => {
+            const method: unknown = Reflect.get(target, key);
+            if (typeof method !== 'function') return method;
+            return (...args: unknown[]) => {
+                const pending = method.apply(target, args) as { send: (...sendArgs: unknown[]) => Promise<unknown> };
+                return {
+                    send: (...sendArgs: unknown[]) =>
+                        firstValueFrom(
+                            send$(() =>
+                                defer(() => {
+                                    admit();
+                                    return pending.send(...sendArgs);
+                                })
+                            )
+                        ),
+                };
+            };
+        },
+    });
+}
+
 /** What a fake signer's `sendTransaction` resolves to: the parts of ethers' response the sdk reads. */
 export interface FakeSentTransaction {
     hash: string;
@@ -492,6 +611,9 @@ export function createFakeWallet(
         connection: { state$ },
         current: () => ({ getSigner: () => Promise.resolve(signer) }),
         currentWalletProvider: (): undefined => undefined,
+        walletProvider$: () => NEVER,
+        walletEvents$: NEVER,
+        load$: NEVER,
         chooseWallet: (): void => undefined,
         switchToExpectedChain: (): void => undefined,
         reportReadFailed: (): void => undefined,
@@ -502,14 +624,16 @@ export function createFakeWallet(
 
 /**
  * Both connections, each a real connectivity machine over a controllable
- * world: whether each endpoint answers its health checks, and whether the
- * network is online. Reads go through `provider` and `rpc`; Solana's
- * websocket stays closed, so the Solana changes machine polls `rpc`.
+ * world: whether each endpoint answers its health checks, how many requests
+ * a second it takes, and whether the network is online. Reads go through
+ * `provider` and `rpc`, as clients over each connection's grants, so every
+ * request takes its machine's turn; Solana's websocket stays closed, so the
+ * Solana changes machine polls `rpc`.
  *
  * @param provider The Ethereum provider reads go through.
  * @param rpc The Solana RPC reads go through.
  * @param wallet An Ethereum wallet transport; reads still go through `provider`.
- * @returns The connections, and the switches that drive them.
+ * @returns The connections, the switches that drive them, and each endpoint's rate.
  */
 export function createTestConnections(
     provider: EthereumProvider,
@@ -518,22 +642,31 @@ export function createTestConnections(
 ) {
     // `…GoesDownOnReadFailure`: the endpoint stops answering at the moment a
     // read reports failing to reach it, so the re-check finds it down.
+    // `…PerSecond`: how many requests a second the endpoint takes; the rest it turns away.
     const world = {
         ethereumAnswers: true,
         solanaAnswers: true,
         ethereumGoesDownOnReadFailure: false,
         solanaGoesDownOnReadFailure: false,
+        ethereumPerSecond: Infinity,
+        solanaPerSecond: Infinity,
     };
+    const ethereumRate = rateOf(() => world.ethereumPerSecond);
+    const solanaRate = rateOf(() => world.solanaPerSecond);
     const network$ = new BehaviorSubject<'online' | 'offline'>('online');
     const ethereumReadFailures = { count: 0 };
     const solanaReadFailures = { count: 0 };
 
     const ethereumReadFailed$ = new Subject<void>();
     const ethereumClose$ = new Subject<void>();
-    const ethereumConnection = httpConnection<EthereumHealth>({
+    const ethereumConnection = httpConnection<EthereumHealth, JsonRpcProvider>({
         ...FAST_TIMINGS,
-        urls: ['https://ethereum.test'],
-        checkHealth: (url) =>
+        urls: [ETHEREUM_URL],
+        transport: {
+            clientOn: (_url, send$) => grantedFakeProvider(provider, send$, ethereumRate.admit),
+            turnedAway: turnedAwayByTestEndpoint,
+        },
+        checkHealth: (_client, url) =>
             defer(() =>
                 world.ethereumAnswers
                     ? of({ outcome: 'onExpectedNetwork' as const, url, health: { blockNumber: 1 }, checkedAt: 0 })
@@ -551,10 +684,14 @@ export function createTestConnections(
 
     const solanaReadFailed$ = new Subject<void>();
     const solanaClose$ = new Subject<void>();
-    const solanaConnection = httpConnection<SolanaHealth>({
+    const solanaConnection = httpConnection<SolanaHealth, SolanaRpc>({
         ...FAST_TIMINGS,
         urls: ['https://solana.test'],
-        checkHealth: (url) =>
+        transport: {
+            clientOn: (_url, send$) => grantedFakeRpc(rpc, send$, solanaRate.admit),
+            turnedAway: turnedAwayByTestEndpoint,
+        },
+        checkHealth: (_client, url) =>
             defer(() =>
                 world.solanaAnswers
                     ? of({ outcome: 'onExpectedNetwork' as const, url, health: { slot: 1n }, checkedAt: 0 })
@@ -575,7 +712,8 @@ export function createTestConnections(
             {
                 http: {
                     connection: ethereumConnection,
-                    current: () => provider,
+                    current: (subscriber: RunningMachine) => ethereumConnection.clientOf(ETHEREUM_URL, subscriber),
+                    load$: ethereumConnection.load$,
                     reportReadFailed: () => {
                         ethereumReadFailures.count++;
                         if (world.ethereumGoesDownOnReadFailure)
@@ -594,7 +732,8 @@ export function createTestConnections(
             {
                 http: {
                     connection: solanaConnection,
-                    rpcOf: () => rpc,
+                    rpcOf: solanaConnection.clientOf,
+                    load$: solanaConnection.load$,
                     reportReadFailed: () => {
                         solanaReadFailures.count++;
                         if (world.solanaGoesDownOnReadFailure) world.solanaAnswers = false;
@@ -617,6 +756,10 @@ export function createTestConnections(
         network$,
         ethereumReadFailures,
         solanaReadFailures,
+        /** How many requests each endpoint turned away for too many. */
+        turnedAway: { ethereum: ethereumRate.counts, solana: solanaRate.counts },
+        /** The Ethereum client a machine's requests go through. */
+        ethereumClientOf: (machine: RunningMachine) => ethereumConnection.clientOf(ETHEREUM_URL, machine),
         close: () => {
             ethereumClose$.next();
             solanaClose$.next();

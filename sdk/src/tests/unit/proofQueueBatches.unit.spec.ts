@@ -144,7 +144,7 @@ describe('proof queue batches machine', () => {
     test('waits for Solana before its first view, then reads it', async () => {
         const { world, connections, close, startSources } = await setUp(32);
         world.solanaAnswers = false;
-        await waitForNode(connections.solana.http.connection, 'unreachable');
+        await waitForNode(connections.solana.http.connection, 'waitingToRetry');
         const sources = startSources();
         const proofQueueBatches = createProofQueueBatchesMachine(
             connections,
@@ -239,8 +239,8 @@ describe('proof queue batch requests machine', () => {
         world.solanaAnswers = false;
         world.ethereumAnswers = false;
         await Promise.all([
-            waitForNode(connections.solana.http.connection, 'unreachable'),
-            waitForNode(connections.ethereum.http.connection, 'unreachable'),
+            waitForNode(connections.solana.http.connection, 'waitingToRetry'),
+            waitForNode(connections.ethereum.http.connection, 'waitingToRetry'),
         ]);
         const proofQueueBatchRequests = createProofQueueBatchRequestsMachine(
             connections,

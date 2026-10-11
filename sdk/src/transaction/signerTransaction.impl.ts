@@ -1,11 +1,13 @@
 import { type ResolveNodeData } from '@yaw-rx/ystate';
-import { type Interface, type Signer } from 'ethers';
-import { map, type Observable, of, Subject } from 'rxjs';
+import { type Interface, type Provider, type Signer } from 'ethers';
+import { catchError, defer, map, type Observable, of, Subject, switchMap, take } from 'rxjs';
 import { type ProofRequestConnections } from '../proofRequest/connectedRead.js';
-import { ethereumCallsUsable$ } from '../rpc/connection/connections.js';
+import { ethereumCallsUsable$, forCalls$ } from '../rpc/connection/connections.js';
 import { type ReadRetryBackoff, startReadThroughConnectionsMachine } from '../rpc/connection/readThroughConnections.impl.js';
 import { type RequestOutcome, requestOutcomes } from '../utils/machines.js';
+import { messageOf } from '../utils/messageOf.js';
 import {
+    type SendResult,
     sendTransaction$,
     sentTransactionRead,
     sentTransactionTransitions,
@@ -34,7 +36,9 @@ type SendOutcome = RequestOutcome<typeof SignerTransactionGraph, 'sent' | 'contr
  * call moves to `notReadyToSend`.
  *
  * @param connections The Ethereum and Solana chains, with their running connectivity machines.
- * @param signer The app's Ethereum signer, e.g. an ethers `Wallet`.
+ * @param signer The app's Ethereum signer, e.g. an ethers `Wallet`; it sends connected to the machine's own provider
+ *   (`signer.connect`), so its requests take the machine's turns. One bound to a provider of the app's own
+ *   (`JsonRpcSigner`) sends through that provider.
  * @param call The contract, the call's data and the value.
  * @param options The contract's error ABI, the drop threshold and the read backoff.
  * @returns The running machine. Its controls:
@@ -50,6 +54,19 @@ export function createSignerTransactionMachine(
     options: TransactionMachineOptions = {}
 ) {
     const transaction = transactionToSendOf(call);
+    /**
+     * The signer on the machine's provider, so its requests take the
+     * machine's turns. A signer bound to a provider of the app's own, which
+     * cannot be moved (ethers' `JsonRpcSigner`), sends through that provider
+     * as it is.
+     */
+    const signerOn = (provider: Provider): Signer => {
+        try {
+            return signer.connect(provider);
+        } catch {
+            return signer;
+        }
+    };
     const send$ = new Subject<void>();
     const dismiss$ = new Subject<void>();
     const { droppedAfterBlocks, ...following } = sentTransactionRead(connections, options.droppedAfterBlocks);
@@ -59,13 +76,21 @@ export function createSignerTransactionMachine(
         ...following,
         backoff: options.backoff,
         start: { node: 'ready', data: { transaction } },
-        ownTransitions: (read$, state$) => {
-            // One send per entry into `sending`.
+        ownTransitions: (read$, state$, started$) => {
+            // One send per entry into `sending`, the signer on this machine's provider, so it takes this machine's turns.
             const taking = requestOutcomes(
                 state$,
                 'sending',
                 ({ transaction }: ResolveNodeData<typeof SignerTransactionGraph.nodes, 'sending'>): Observable<SendOutcome> =>
-                    sendTransaction$(of(signer), transaction, options.errors).pipe(
+                    started$.pipe(
+                        take(1),
+                        switchMap((machine) =>
+                            forCalls$(connections.ethereum, machine, (provider) =>
+                                sendTransaction$(defer(() => of(signerOn(provider))), transaction, options.errors)
+                            )
+                        ),
+                        catchError((error: unknown) => of<SendResult>({ outcome: 'failed', error: messageOf(error) }))
+                    ).pipe(
                         map((result): SendOutcome => {
                             if (result.outcome === 'sent') return { transition: 'sent', data: result.sent };
                             if (result.outcome === 'refused')

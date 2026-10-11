@@ -1,5 +1,5 @@
 import { type ResolveNodeData } from '@yaw-rx/ystate';
-import { defer, filter, map, type Observable, Subject, switchMap } from 'rxjs';
+import { defer, filter, map, type Observable, Subject, switchMap, take } from 'rxjs';
 import { type ProofRequestConnections } from '../../proofRequest/connectedRead.js';
 import { type TransactionToSend } from '../../transaction/sentTransaction.js';
 import {
@@ -53,14 +53,18 @@ export function createWalletTransactionMachine(
         ...following,
         backoff: options.backoff,
         start: { node: 'ready', data: { transaction } },
-        ownTransitions: (read$, state$) => {
-            // One request to the wallet per entry into `askingToSign`.
+        ownTransitions: (read$, state$, started$) => {
+            // One request to the wallet per entry into `askingToSign`, on this machine's turns.
             const taking = requestOutcomes(
                 state$,
                 'askingToSign',
                 ({ transaction }: ResolveNodeData<typeof WalletTransactionGraph.nodes, 'askingToSign'>): Observable<SendOutcome> =>
                     sendTransaction$(
-                        wallet.ready$().pipe(switchMap((provider) => defer(() => provider.getSigner()))),
+                        started$.pipe(
+                            take(1),
+                            switchMap((machine) => wallet.ready$(machine)),
+                            switchMap((provider) => defer(() => provider.getSigner()))
+                        ),
                         transaction,
                         options.errors
                     ).pipe(

@@ -1,4 +1,5 @@
 import { type EthereumProvider } from '@nori-zk/ethereum-solana-bridge/iso-provider';
+import { type RunningMachine } from '@yaw-rx/ystate';
 import { type BrowserProvider, isError } from 'ethers';
 import {
     catchError,
@@ -17,7 +18,7 @@ import {
 } from 'rxjs';
 import { atNode, type GraphState, type StartedMachine } from '../../utils/machines.js';
 import { messageOf } from '../../utils/messageOf.js';
-import { type Eip1193EventProvider, requestErrorCode } from '../eth/eip1193.js';
+import { type Eip1193EventProvider, type Eip1193Events, requestErrorCode } from '../eth/eip1193.js';
 import { EthRpcTransportError, NoWalletConfiguredError } from '../eth/errors.js';
 import { ethereumHttp, type EthereumHttp } from '../eth/ethereumHttp.js';
 import { ethereumWallet, type EthereumWallet } from '../eth/ethereumWallet.impl.js';
@@ -39,16 +40,11 @@ import {
     type SolanaRpc,
 } from '../solana/solanaHttp.js';
 import { solanaWebsocket, type SolanaWebsocket, solanaWebsocketUrlOf } from '../solana/solanaWebsocket.js';
+import { SERVING_NODES } from './connection.js';
+import { RequestNotSentError } from './connectionGrants.js';
 import { ConnectionNotReadyError, type TransportName, type TransportState } from './connectionNotReady.js';
-import {
-    createConnectionStatusMachine,
-    httpStatus,
-    networkStatus,
-    walletStatus,
-    websocketStatus,
-} from './connectionStatus.impl.js';
 import { type HealthCheckTimings, resolveHealthCheckTimings } from './healthCheckTimings.js';
-import { jsonRpcSubscription$, jsonRpcTopic$, type SubscriptionEvent } from './jsonRpcTopic.js';
+import { type SubscriptionEvent } from './jsonRpcTopic.js';
 import { createNetworkMachine, type NetworkOptions } from './network.impl.js';
 
 /** A machine's states, as far as being usable is concerned. */
@@ -77,14 +73,19 @@ export interface EthereumSubscriptionSocket {
 
 /** What makes up the Ethereum chain object: the transports the app configured. */
 export interface EthereumTransports {
-    http?: Pick<EthereumHttp, 'connection' | 'current' | 'reportReadFailed' | 'close'>;
-    websocket?: Pick<EthereumWebsocket, 'connection' | 'socket' | 'current' | 'close'>;
+    http?: Pick<EthereumHttp, 'connection' | 'current' | 'load$' | 'reportReadFailed' | 'close'>;
+    websocket?: Pick<
+        EthereumWebsocket,
+        'connection' | 'socket' | 'current' | 'clientOf' | 'load$' | 'reportReadFailed' | 'close'
+    >;
     wallet?: Pick<
         EthereumWallet,
         | 'connection'
         | 'current'
+        | 'load$'
         | 'currentWalletProvider'
         | 'walletProvider$'
+        | 'walletEvents$'
         | 'chooseWallet'
         | 'switchToExpectedChain'
         | 'reportReadFailed'
@@ -94,36 +95,48 @@ export interface EthereumTransports {
 
 /** What makes up the Solana chain object: the RPC endpoints and the websocket. */
 export interface SolanaTransports {
-    http: Pick<SolanaHttp, 'connection' | 'rpcOf' | 'reportReadFailed' | 'close'>;
-    websocket: Pick<SolanaWebsocket, 'connection' | 'socket'> & { close(): void };
+    http: Pick<SolanaHttp, 'connection' | 'rpcOf' | 'load$' | 'reportReadFailed' | 'close'>;
+    websocket: Pick<SolanaWebsocket, 'connection' | 'socket' | 'clientOf' | 'load$'> & { close(): void };
     /** The user's Solana wallet, which signs and sends the app's Solana transactions. */
     wallet?: SolanaWallet;
 }
 
-/** The node a transport is usable in: `open` for a websocket, `ready` otherwise. */
-const usableNode = (transport: RequestTransport): string =>
-    transport === 'websocket' ? 'open' : 'ready';
+/**
+ * Whether a request was never sent, as is or as ethers wraps it: its
+ * connection moved on from the endpoint, or closed, while it waited.
+ *
+ * @param error A failure.
+ * @returns `true` when it was never sent.
+ */
+function notSent(error: unknown): boolean {
+    const inner =
+        typeof error === 'object' && error !== null && 'error' in error
+            ? (error as { error: unknown }).error
+            : undefined;
+    return error instanceof RequestNotSentError || inner instanceof RequestNotSentError;
+}
 
 /**
  * Whether a failure means a request never reached the node, rather than
- * the node answering with an error: our transport errors, ethers' network,
+ * the node answering with an error: our transport errors, a request the
+ * grants never sent (as is, or as ethers wraps it), ethers' network,
  * timeout and server errors, and EIP-1193's disconnected codes.
  *
  * @param error A failure.
  * @returns `true` when the node was never reached.
  */
 function neverReachedNode(error: unknown): boolean {
-    if (error instanceof EthRpcTransportError) return true;
+    const inner =
+        typeof error === 'object' && error !== null && 'error' in error
+            ? (error as { error: unknown }).error
+            : undefined;
+    if (error instanceof EthRpcTransportError || notSent(error)) return true;
     if (
         isError(error, 'NETWORK_ERROR') ||
         isError(error, 'TIMEOUT') ||
         isError(error, 'SERVER_ERROR')
     )
         return true;
-    const inner =
-        typeof error === 'object' && error !== null && 'error' in error
-            ? (error as { error: unknown }).error
-            : undefined;
     return [requestErrorCode(error), requestErrorCode(inner)].some(
         (code) => code === 4900 || code === 4901
     );
@@ -134,25 +147,25 @@ function neverReachedNode(error: unknown): boolean {
  *
  * @param name The transport's name, for the error.
  * @param transport The transport, or `undefined` when not configured.
- * @param node The node it is usable in.
+ * @param nodes The nodes it is usable in.
  * @param notConfigured The error for a transport the app did not configure.
- * @returns A function giving the client once, or erroring with `ConnectionNotReadyError`
+ * @returns A function giving the subscriber's client once, or erroring with `ConnectionNotReadyError`
  *   (or `notConfigured`'s error).
  */
 function readyOf<TClient>(
     name: TransportName,
-    transport: { connection: MachineStates; current(): TClient | undefined } | undefined,
-    node: string,
+    transport: { connection: MachineStates; current(subscriber: RunningMachine): TClient | undefined } | undefined,
+    nodes: readonly string[],
     notConfigured: () => Error = () => new Error(`${name} is not configured.`)
-): () => Observable<TClient> {
-    return () =>
+): (subscriber: RunningMachine) => Observable<TClient> {
+    return (subscriber) =>
         transport === undefined
             ? throwError(notConfigured)
             : transport.connection.state$.pipe(
                   take(1),
                   map((state) => {
-                      const client = transport.current();
-                      if (state.node !== node || client === undefined)
+                      const client = transport.current(subscriber);
+                      if (!nodes.includes(state.node) || client === undefined)
                           throw new ConnectionNotReadyError([{ transport: name, state }]);
                       return client;
                   })
@@ -205,7 +218,7 @@ export function ethereumChain(
     const transportName = (transport: RequestTransport): TransportName => `ethereum.${transport}`;
     const report = {
         http: () => http?.reportReadFailed(),
-        websocket: () => websocket?.socket.forceReconnect(),
+        websocket: () => websocket?.reportReadFailed(),
         wallet: () => wallet?.reportReadFailed(),
     };
     const callsOrder = orderFor('calls', order.calls, ['http', 'websocket', 'wallet'], configured);
@@ -219,12 +232,14 @@ export function ethereumChain(
 
     /**
      * Runs `op` on the first transport in `transportOrder` whose machine is
-     * usable; a request that never reached the node tells that transport and
-     * runs `op` on the next. With none left it errors with every transport's
-     * state (`ConnectionNotReadyError`). Unsubscribing cancels it.
+     * usable, its requests on the subscriber's turns; a request that never
+     * reached the node tells that transport and runs `op` on the next. With
+     * none left it errors with every transport's state
+     * (`ConnectionNotReadyError`). Unsubscribing cancels it.
      */
     const runInOrder$ = <T>(
         transportOrder: RequestTransport[],
+        subscriber: RunningMachine,
         op: (provider: EthereumProvider) => Observable<T>
     ): Observable<T> =>
         defer(() => {
@@ -238,15 +253,16 @@ export function ethereumChain(
                 return machine.state$.pipe(
                     take(1),
                     switchMap((state) => {
-                        const provider = transports[transport]?.current() as EthereumProvider | undefined;
-                        if (state.node !== usableNode(transport) || provider === undefined) {
+                        const provider = transports[transport]?.current(subscriber) as EthereumProvider | undefined;
+                        if (!SERVING_NODES.includes(state.node) || provider === undefined) {
                             notReady.push({ transport: transportName(transport), state });
                             return attempt(index + 1);
                         }
                         return op(provider).pipe(
                             catchError((error: unknown) => {
                                 if (!neverReachedNode(error)) return throwError(() => error);
-                                report[transport]();
+                                // A request never sent (its connection moved on) says nothing of the endpoint.
+                                if (!notSent(error)) report[transport]();
                                 notReady.push({
                                     transport: transportName(transport),
                                     state: { node: 'noResponse', data: { error: messageOf(error) } },
@@ -260,23 +276,29 @@ export function ethereumChain(
             return attempt(0);
         });
 
-    const forCalls$ = <T>(op: (provider: EthereumProvider) => Observable<T>): Observable<T> =>
-        runInOrder$(callsOrder, op);
+    const forCalls$ = <T>(subscriber: RunningMachine, op: (provider: EthereumProvider) => Observable<T>): Observable<T> =>
+        runInOrder$(callsOrder, subscriber, op);
 
-    const forLogs$ = <T>(op: (provider: EthereumProvider) => Observable<T>): Observable<T> =>
-        runInOrder$(logsOrder, op);
+    const forLogs$ = <T>(subscriber: RunningMachine, op: (provider: EthereumProvider) => Observable<T>): Observable<T> =>
+        runInOrder$(logsOrder, subscriber, op);
 
-    /** Where `eth_subscribe` goes for each subscription transport. */
-    const subscriptionSockets: Record<SubscriptionTransport, () => EthereumSubscriptionSocket | undefined> = {
-        websocket: () =>
-            websocket && {
-                ethSubscribe: <T>(params: unknown[]) =>
-                    jsonRpcTopic$<T>(websocket.socket, 'eth_subscribe', params, 'eth_unsubscribe'),
-                ethSubscribeEvents: <T>(params: unknown[]) =>
-                    jsonRpcSubscription$<T>(websocket.socket, 'eth_subscribe', params, 'eth_unsubscribe'),
-            },
-        wallet: () => {
-            const provider = wallet?.currentWalletProvider();
+    /** Where `eth_subscribe` goes for each subscription transport, its requests on the subscriber's turns. */
+    const subscriptionSockets: Record<
+        SubscriptionTransport,
+        (subscriber: RunningMachine) => EthereumSubscriptionSocket | undefined
+    > = {
+        websocket: (subscriber) => {
+            const client = websocket?.clientOf(subscriber);
+            return (
+                client && {
+                    ethSubscribe: <T>(params: unknown[]) => client.topic$<T>('eth_subscribe', params, 'eth_unsubscribe'),
+                    ethSubscribeEvents: <T>(params: unknown[]) =>
+                        client.subscription$<T>('eth_subscribe', params, 'eth_unsubscribe'),
+                }
+            );
+        },
+        wallet: (subscriber) => {
+            const provider = wallet?.currentWalletProvider(subscriber);
             return (
                 provider && {
                     ethSubscribe: <T>(params: unknown[]) => walletSubscription$<T>(provider, params),
@@ -289,16 +311,16 @@ export function ethereumChain(
      * Whether a transport's machine is usable, as it changes.
      *
      * @param transport The transport.
-     * @param whileChecking Count it re-checking itself as usable.
+     * @param whileConnecting Count it re-checking itself as usable.
      */
-    const transportUsable$ = (transport: RequestTransport, whileChecking = false): Observable<boolean> => {
+    const transportUsable$ = (transport: RequestTransport, whileConnecting = false): Observable<boolean> => {
         const machine: MachineStates | undefined = transports[transport]?.connection;
         return machine === undefined
             ? of(false)
             : machine.state$.pipe(
                   map(
                       (state) =>
-                          state.node === usableNode(transport) || (whileChecking && state.node === 'checking')
+                          SERVING_NODES.includes(state.node) || (whileConnecting && state.node === 'connecting')
                   ),
                   distinctUntilChanged()
               );
@@ -306,8 +328,9 @@ export function ethereumChain(
 
     const forTransport$ = <T>(
         transport: RequestTransport,
+        subscriber: RunningMachine,
         op: (provider: EthereumProvider) => Observable<T>
-    ): Observable<T> => runInOrder$([transport], op);
+    ): Observable<T> => runInOrder$([transport], subscriber, op);
 
     /** The transports in the caller's subscriptions order whose machine is usable, in that order, as it changes. */
     const subscribable$: Observable<SubscriptionTransport[]> =
@@ -318,13 +341,17 @@ export function ethereumChain(
               );
 
     /**
-     * `eth_subscribe` on one transport: the node acknowledging it, then each
-     * result; errors with its state (`ConnectionNotReadyError`) when it has
-     * nothing to send it through.
+     * `eth_subscribe` on one transport, its requests on the subscriber's
+     * turns: the node acknowledging it, then each result; errors with its
+     * state (`ConnectionNotReadyError`) when it has nothing to send it through.
      */
-    const ethSubscribe$ = <T>(transport: SubscriptionTransport, params: unknown[]): Observable<SubscriptionEvent<T>> =>
+    const ethSubscribe$ = <T>(
+        transport: SubscriptionTransport,
+        params: unknown[],
+        subscriber: RunningMachine
+    ): Observable<SubscriptionEvent<T>> =>
         defer(() => {
-            const socket = subscriptionSockets[transport]();
+            const socket = subscriptionSockets[transport](subscriber);
             if (socket !== undefined) return socket.ethSubscribeEvents<T>(params);
             const machine: MachineStates | undefined = transports[transport]?.connection;
             return (machine?.state$ ?? of({ node: 'notConfigured', data: {} })).pipe(
@@ -335,40 +362,28 @@ export function ethereumChain(
             );
         });
 
-    // The chain's status over its calls order: what its reads and views follow.
-    const transportStatus$ = {
-        http: () => http?.connection.state$.pipe(httpStatus(transportName('http'))),
-        websocket: () =>
-            websocket?.connection.state$.pipe(websocketStatus(transportName('websocket'))),
-        wallet: () => wallet?.connection.state$.pipe(walletStatus(transportName('wallet'))),
-    };
-    const status = createConnectionStatusMachine(
-        callsOrder.flatMap((transport) => {
-            const status$ = transportStatus$[transport]();
-            return status$ === undefined ? [] : [status$];
-        })
-    );
-
     const chain = {
-        status: {
-            connection: status,
-            close: () => status.close(),
-        },
         http: {
             connection: http?.connection,
+            /** Each second's count of the requests through http's grants, and the rate after it. */
+            load$: http?.load$ ?? NEVER,
             close: () => http?.close(),
         },
         websocket: {
             connection: websocket?.connection,
             socket: websocket?.socket,
+            /** Each second's count of the requests through the websocket's grants, and the rate after it. */
+            load$: websocket?.load$ ?? NEVER,
             close: () => websocket?.close(),
         },
         wallet: {
             connection: wallet?.connection,
+            /** Each second's count of the requests through the wallet's grants, and the rate after it. */
+            load$: wallet?.load$ ?? NEVER,
             ready$: readyOf<BrowserProvider>(
                 transportName('wallet'),
                 wallet,
-                'ready',
+                SERVING_NODES,
                 () => new NoWalletConfiguredError()
             ),
             chooseWallet: (uuid: string) => wallet?.chooseWallet(uuid),
@@ -376,15 +391,17 @@ export function ethereumChain(
             close: () => wallet?.close(),
         },
     };
-    const callsUsable$ = (whileChecking: boolean) =>
+    const callsUsable$ = (whileConnecting: boolean) =>
         (callsOrder.length === 0
             ? of([false])
-            : combineLatest(callsOrder.map((transport) => transportUsable$(transport, whileChecking)))
+            : combineLatest(callsOrder.map((transport) => transportUsable$(transport, whileConnecting)))
         ).pipe(
             map((usable) => usable.some(Boolean)),
             distinctUntilChanged()
         );
-    const walletProvider$: Observable<Eip1193EventProvider> = wallet?.walletProvider$ ?? NEVER;
+    const walletProvider$ = (subscriber: RunningMachine): Observable<Eip1193EventProvider> =>
+        wallet?.walletProvider$(subscriber) ?? NEVER;
+    const walletEvents$: Observable<Eip1193Events> = wallet?.walletEvents$ ?? NEVER;
     internals.set(chain, {
         forCalls$,
         forLogs$,
@@ -395,6 +412,7 @@ export function ethereumChain(
         callsUsable$,
         transportUsable$,
         walletProvider$,
+        walletEvents$,
     });
     return chain;
 }
@@ -404,15 +422,24 @@ export type Ethereum = ReturnType<typeof ethereumChain>;
 
 /** What the sdk's own functions reach an Ethereum chain object through; not on the object. */
 interface EthereumInternals {
-    forCalls$<T>(op: (provider: EthereumProvider) => Observable<T>): Observable<T>;
-    forLogs$<T>(op: (provider: EthereumProvider) => Observable<T>): Observable<T>;
-    forTransport$<T>(transport: RequestTransport, op: (provider: EthereumProvider) => Observable<T>): Observable<T>;
+    forCalls$<T>(subscriber: RunningMachine, op: (provider: EthereumProvider) => Observable<T>): Observable<T>;
+    forLogs$<T>(subscriber: RunningMachine, op: (provider: EthereumProvider) => Observable<T>): Observable<T>;
+    forTransport$<T>(
+        transport: RequestTransport,
+        subscriber: RunningMachine,
+        op: (provider: EthereumProvider) => Observable<T>
+    ): Observable<T>;
     subscribable$: Observable<SubscriptionTransport[]>;
-    ethSubscribe$<T>(transport: SubscriptionTransport, params: unknown[]): Observable<SubscriptionEvent<T>>;
+    ethSubscribe$<T>(
+        transport: SubscriptionTransport,
+        params: unknown[],
+        subscriber: RunningMachine
+    ): Observable<SubscriptionEvent<T>>;
     pollIntervalMs: number;
-    callsUsable$(whileChecking: boolean): Observable<boolean>;
-    transportUsable$(transport: RequestTransport, whileChecking?: boolean): Observable<boolean>;
-    walletProvider$: Observable<Eip1193EventProvider>;
+    callsUsable$(whileConnecting: boolean): Observable<boolean>;
+    transportUsable$(transport: RequestTransport, whileConnecting?: boolean): Observable<boolean>;
+    walletProvider$(subscriber: RunningMachine): Observable<Eip1193EventProvider>;
+    walletEvents$: Observable<Eip1193Events>;
 }
 
 /** Each Ethereum chain object's internals. */
@@ -431,34 +458,39 @@ function internalsOf(ethereum: Ethereum): EthereumInternals {
 }
 
 /**
- * Runs `op` on the first usable transport in the chain's calls order; a
- * request in it that never reached the node tells that transport and runs
- * `op` on the next. With none left it errors with every transport's state
- * (`ConnectionNotReadyError`). Unsubscribing cancels it.
+ * Runs `op` on the first usable transport in the chain's calls order, its
+ * requests on the subscriber's turns; a request in it that never reached
+ * the node tells that transport and runs `op` on the next. With none left
+ * it errors with every transport's state (`ConnectionNotReadyError`).
+ * Unsubscribing cancels it.
  *
  * @param ethereum The chain.
+ * @param subscriber The machine the requests are for.
  * @param op The read, given the provider.
  * @returns What `op` emits.
  */
 export function forCalls$<T>(
     ethereum: Ethereum,
+    subscriber: RunningMachine,
     op: (provider: EthereumProvider) => Observable<T>
 ): Observable<T> {
-    return internalsOf(ethereum).forCalls$(op);
+    return internalsOf(ethereum).forCalls$(subscriber, op);
 }
 
 /**
  * As `forCalls$`, in the chain's logs order.
  *
  * @param ethereum The chain.
+ * @param subscriber The machine the requests are for.
  * @param op The read, given the provider.
  * @returns What `op` emits.
  */
 export function forLogs$<T>(
     ethereum: Ethereum,
+    subscriber: RunningMachine,
     op: (provider: EthereumProvider) => Observable<T>
 ): Observable<T> {
-    return internalsOf(ethereum).forLogs$(op);
+    return internalsOf(ethereum).forLogs$(subscriber, op);
 }
 
 /**
@@ -483,16 +515,16 @@ export function subscriptionsOf(
  * changes; the reading machines gate on it.
  *
  * @param ethereum An Ethereum chain object.
- * @param whileChecking Count a transport re-checking itself as usable: a
+ * @param whileConnecting Count a transport re-checking itself as usable: a
  *   failed request sends it there, and what that failure was is decided
  *   once the check settles.
  * @returns `true` while a call could be made.
  */
 export function ethereumCallsUsable$(
     ethereum: Ethereum,
-    whileChecking = false
+    whileConnecting = false
 ): Observable<boolean> {
-    return internals.get(ethereum)?.callsUsable$(whileChecking) ?? of(false);
+    return internals.get(ethereum)?.callsUsable$(whileConnecting) ?? of(false);
 }
 
 /**
@@ -503,15 +535,17 @@ export function ethereumCallsUsable$(
  *
  * @param ethereum The Ethereum chain.
  * @param transport The transport.
+ * @param subscriber The machine the requests are for.
  * @param op The read, given the transport's provider.
  * @returns What `op` emits.
  */
 export function forTransport$<T>(
     ethereum: Ethereum,
     transport: RequestTransport,
+    subscriber: RunningMachine,
     op: (provider: EthereumProvider) => Observable<T>
 ): Observable<T> {
-    return internalsOf(ethereum).forTransport$(transport, op);
+    return internalsOf(ethereum).forTransport$(transport, subscriber, op);
 }
 
 /**
@@ -519,57 +553,73 @@ export function forTransport$<T>(
  *
  * @param ethereum The Ethereum chain.
  * @param transport The transport.
- * @param whileChecking Count it re-checking itself as usable.
+ * @param whileConnecting Count it re-checking itself as usable.
  * @returns `true` while it is usable.
  */
 export function transportUsable$(
     ethereum: Ethereum,
     transport: RequestTransport,
-    whileChecking = false
+    whileConnecting = false
 ): Observable<boolean> {
-    return internals.get(ethereum)?.transportUsable$(transport, whileChecking) ?? of(false);
+    return internals.get(ethereum)?.transportUsable$(transport, whileConnecting) ?? of(false);
 }
 
 /**
- * The Ethereum chain's wallet's EIP-1193 provider, once the user's wallet is chosen.
+ * The Ethereum chain's wallet's EIP-1193 provider, once the user's wallet is
+ * chosen: its requests on the subscriber's turns, its events the wallet's own.
  *
  * @param ethereum The Ethereum chain.
+ * @param subscriber The machine the requests are for.
  * @returns The chosen wallet's provider; nothing without a wallet.
  */
-export function walletProviderOf$(ethereum: Ethereum): Observable<Eip1193EventProvider> {
-    return internals.get(ethereum)?.walletProvider$ ?? NEVER;
+export function walletProviderOf$(ethereum: Ethereum, subscriber: RunningMachine): Observable<Eip1193EventProvider> {
+    return internals.get(ethereum)?.walletProvider$(subscriber) ?? NEVER;
+}
+
+/**
+ * The Ethereum chain's wallet's events alone, once the user's wallet is
+ * chosen: what follows the wallet without making a request.
+ *
+ * @param ethereum The Ethereum chain.
+ * @returns The chosen wallet's events; nothing without a wallet.
+ */
+export function walletEventsOf$(ethereum: Ethereum): Observable<Eip1193Events> {
+    return internals.get(ethereum)?.walletEvents$ ?? NEVER;
 }
 
 /**
  * The Solana chain object: its RPC endpoints (`http`), which serve every
- * read, and its websocket, which serves its subscriptions; each with its
- * machine and `close()`, and `status`, whether its reads can run.
+ * read, and its websocket, which serves its subscriptions, and the user's
+ * wallet, which signs; each with its machine and `close()`.
  *
  * @param transports The transports.
  * @param pollIntervalMs How often the Solana changes machine polls while the websocket is not open.
  * @returns The Solana chain object.
  */
 export function solanaChain({ http, websocket, wallet }: SolanaTransports, pollIntervalMs = 5_000) {
-    // Reads go through http only: the chain's status is its http's.
-    const status = createConnectionStatusMachine([http.connection.state$.pipe(httpStatus('solana.http'))]);
-
     /**
-     * Runs `op` on the RPC of the endpoint whose check passed while http is
-     * `ready`; a request that failed to reach a healthy node tells http.
-     * Otherwise it errors with http's state (`ConnectionNotReadyError`).
+     * Runs `op` on the RPC of the endpoint whose check passed while http
+     * serves requests (`ready`, `overwhelmed`), its requests on the
+     * subscriber's turns; a request that failed to reach a healthy node tells
+     * http. Otherwise it errors with http's state (`ConnectionNotReadyError`).
      * Unsubscribing cancels it.
      */
-    const forSolana$ = <T>(op: (rpc: SolanaRpc) => Observable<T>): Observable<T> =>
+    const forSolana$ = <T>(subscriber: RunningMachine, op: (rpc: SolanaRpc) => Observable<T>): Observable<T> =>
         http.connection.state$.pipe(
             take(1),
             switchMap((state) => {
-                const rpc = state.node === 'ready' ? http.rpcOf(state.data.url) : undefined;
+                const rpc =
+                    state.node === 'ready' || state.node === 'overwhelmed'
+                        ? http.rpcOf(state.data.url, subscriber)
+                        : undefined;
                 if (rpc === undefined)
                     return throwError(() => new ConnectionNotReadyError([{ transport: 'solana.http', state }]));
                 return op(rpc).pipe(
                     catchError((error: unknown) => {
-                        if (!(error instanceof SolanaRpcTransportError)) return throwError(() => error);
-                        http.reportReadFailed();
+                        if (!(error instanceof SolanaRpcTransportError) && !(error instanceof RequestNotSentError))
+                            return throwError(() => error);
+                        // A request never sent (its connection moved on) says nothing of the endpoint.
+                        if (error instanceof SolanaRpcTransportError) http.reportReadFailed();
                         return throwError(
                             () =>
                                 new ConnectionNotReadyError([
@@ -584,36 +634,37 @@ export function solanaChain({ http, websocket, wallet }: SolanaTransports, pollI
             })
         );
 
-    const callsUsable$ = (whileChecking: boolean): Observable<boolean> =>
+    const callsUsable$ = (whileConnecting: boolean): Observable<boolean> =>
         http.connection.state$.pipe(
-            map(({ node }) => node === 'ready' || (whileChecking && node === 'checking')),
+            map(({ node }) => SERVING_NODES.includes(node) || (whileConnecting && node === 'connecting')),
             distinctUntilChanged()
         );
 
     const subscribable$: Observable<boolean> = websocket.connection.state$.pipe(
-        map(({ node }) => node === 'open'),
+        map(({ node }) => SERVING_NODES.includes(node)),
         distinctUntilChanged()
     );
 
     const subscribe$ = <T>(
         subscribeMethod: string,
         params: unknown[],
-        unsubscribeMethod: string
+        unsubscribeMethod: string,
+        subscriber: RunningMachine
     ): Observable<SubscriptionEvent<T>> =>
-        jsonRpcSubscription$<T>(websocket.socket, subscribeMethod, params, unsubscribeMethod);
+        websocket.clientOf(subscriber).subscription$<T>(subscribeMethod, params, unsubscribeMethod);
 
     const chain = {
-        status: {
-            connection: status,
-            close: () => status.close(),
-        },
         http: {
             connection: http.connection,
+            /** Each second's count of the requests through http's grants, and the rate after it. */
+            load$: http.load$,
             close: () => http.close(),
         },
         websocket: {
             connection: websocket.connection,
             socket: websocket.socket,
+            /** Each second's count of the requests through the websocket's grants, and the rate after it. */
+            load$: websocket.load$,
             close: () => websocket.close(),
         },
         wallet: {
@@ -621,7 +672,7 @@ export function solanaChain({ http, websocket, wallet }: SolanaTransports, pollI
             ready$: readyOf<TransactionSendingSigner>(
                 'solana.wallet',
                 wallet,
-                'ready',
+                ['ready'],
                 () => new NoSolanaWalletConfiguredError()
             ),
             chooseWallet: (name: string) => wallet?.chooseWallet(name),
@@ -641,19 +692,20 @@ export function solanaChain({ http, websocket, wallet }: SolanaTransports, pollI
     return chain;
 }
 
-/** The Solana chain: http and the websocket, each with its machine and `close()`, and its status. */
+/** The Solana chain: http, the websocket and the wallet, each with its machine and `close()`. */
 export type Solana = ReturnType<typeof solanaChain>;
 
 /** What the sdk's own functions reach a Solana chain object through; not on the object. */
 interface SolanaInternals {
-    forSolana$<T>(op: (rpc: SolanaRpc) => Observable<T>): Observable<T>;
-    callsUsable$(whileChecking: boolean): Observable<boolean>;
+    forSolana$<T>(subscriber: RunningMachine, op: (rpc: SolanaRpc) => Observable<T>): Observable<T>;
+    callsUsable$(whileConnecting: boolean): Observable<boolean>;
     walletUsable$: Observable<boolean>;
     subscribable$: Observable<boolean>;
     subscribe$<T>(
         subscribeMethod: string,
         params: unknown[],
-        unsubscribeMethod: string
+        unsubscribeMethod: string,
+        subscriber: RunningMachine
     ): Observable<SubscriptionEvent<T>>;
     pollIntervalMs: number;
 }
@@ -674,17 +726,23 @@ function solanaInternalsOf(solana: Solana): SolanaInternals {
 }
 
 /**
- * Runs `op` on the Solana RPC while http is `ready`; a request that failed
- * to reach a healthy node tells http, which checks itself again, and errors
- * with `ConnectionNotReadyError` as an unanswered request. Unsubscribing
- * cancels it.
+ * Runs `op` on the Solana RPC while http serves requests (`ready`,
+ * `overwhelmed`), its requests on the subscriber's turns; a request that
+ * failed to reach a healthy node tells http, which checks itself again, and
+ * errors with `ConnectionNotReadyError` as an unanswered request.
+ * Unsubscribing cancels it.
  *
  * @param solana The Solana chain.
+ * @param subscriber The machine the requests are for.
  * @param op The read, given the RPC.
  * @returns What `op` emits.
  */
-export function forSolana$<T>(solana: Solana, op: (rpc: SolanaRpc) => Observable<T>): Observable<T> {
-    return solanaInternalsOf(solana).forSolana$(op);
+export function forSolana$<T>(
+    solana: Solana,
+    subscriber: RunningMachine,
+    op: (rpc: SolanaRpc) => Observable<T>
+): Observable<T> {
+    return solanaInternalsOf(solana).forSolana$(subscriber, op);
 }
 
 /**
@@ -692,11 +750,11 @@ export function forSolana$<T>(solana: Solana, op: (rpc: SolanaRpc) => Observable
  * machines gate on it.
  *
  * @param solana The Solana chain.
- * @param whileChecking Count it re-checking itself as usable.
+ * @param whileConnecting Count it re-checking itself as usable.
  * @returns `true` while a read could be made.
  */
-export function solanaCallsUsable$(solana: Solana, whileChecking = false): Observable<boolean> {
-    return solanaInternals.get(solana)?.callsUsable$(whileChecking) ?? of(false);
+export function solanaCallsUsable$(solana: Solana, whileConnecting = false): Observable<boolean> {
+    return solanaInternals.get(solana)?.callsUsable$(whileConnecting) ?? of(false);
 }
 
 /**
@@ -716,9 +774,10 @@ export function solanaWalletUsable$(solana: Solana): Observable<boolean> {
  *
  * @param solana The Solana chain.
  * @returns
- *   - `subscribable$`: whether the websocket is open, as it changes.
- *   - `subscribe$(subscribeMethod, params, unsubscribeMethod)`: one subscription on it: its acknowledgement, then each notification.
- *   - `pollIntervalMs`: how often to poll while it is not open.
+ *   - `subscribable$`: whether the websocket serves, as it changes.
+ *   - `subscribe$(subscribeMethod, params, unsubscribeMethod, subscriber)`: one subscription on it, on the subscriber's
+ *     turns: its acknowledgement, then each notification.
+ *   - `pollIntervalMs`: how often to poll while it does not serve.
  */
 export function solanaSubscriptionsOf(
     solana: Solana
@@ -872,12 +931,7 @@ function openConnections(options: ConnectionsOptions) {
     );
     // Everything read from Nori's websocket is started once here and shared:
     // one socket, so one server's view, for the whole app.
-    const noriStatus = createConnectionStatusMachine([
-        noriWs.connection.state$.pipe(websocketStatus('nori.websocket')),
-    ]);
-    const networkStatusMachine = createConnectionStatusMachine([network.state$.pipe(networkStatus())]);
     const nori = {
-        status: { connection: noriStatus, close: () => noriStatus.close() },
         websocket: { ...noriWs, close: () => noriWs.socket.complete() },
         /** The pipeline's transitions and the stage it is at, kept following until `close()`. */
         transitions: startNoriBridgeInfraTransitions(noriWs),
@@ -890,20 +944,12 @@ function openConnections(options: ConnectionsOptions) {
     return {
         network: {
             connection: network,
-            status: {
-                connection: networkStatusMachine,
-                close: () => networkStatusMachine.close(),
-            },
         },
         ethereum: Object.assign(ethereum, { wallet: Object.assign(ethereum.wallet, { account: ethereumAccount }) }),
         solana,
         nori,
         close: () => {
             ethereumAccount?.close();
-            ethereum.status.close();
-            solana.status.close();
-            nori.status.close();
-            networkStatusMachine.close();
             ethereum.http.close();
             ethereum.websocket.close();
             ethereum.wallet.close();

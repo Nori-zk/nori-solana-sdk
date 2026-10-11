@@ -38,18 +38,24 @@ const sentAs =
 
 /**
  * The app's own signer, answering its sends in turn with `answers` (the
- * last one again once they run out), and the transactions it was asked to send.
+ * last one again once they run out), the transactions it was asked to send,
+ * and the providers it was connected to before sending.
  */
 function signerAnswering(...answers: (() => Promise<FakeSentTransaction>)[]) {
     const asked: TransactionRequest[] = [];
+    const connectedTo: unknown[] = [];
     const signer = {
         address: TARGET_A,
+        connect: (provider: unknown) => {
+            connectedTo.push(provider);
+            return signer;
+        },
         sendTransaction: (transaction: TransactionRequest) => {
             asked.push(transaction);
             return answers[Math.min(asked.length, answers.length) - 1]();
         },
     } as unknown as Signer;
-    return { signer, asked };
+    return { signer, asked, connectedTo };
 }
 
 /** Both chains, connected. */
@@ -72,9 +78,27 @@ const nodesDuring = async (machine: Parameters<typeof statesDuring>[0]) =>
     new Set((await statesDuring(machine, 50)).map((state) => (state as { node: string }).node));
 
 describe('Ethereum signer transaction machine', () => {
-    test('waits in ready for a send request, then sends and follows the transaction until it is confirmed', async () => {
+    test('a signer bound to a provider of the app own, which cannot be reconnected, sends as it is', async () => {
         const { connections, close } = await setUp();
         const { signer, asked } = signerAnswering(sentAs(MINED));
+        // ethers' JsonRpcSigner refuses to be moved to another provider.
+        Object.assign(signer, {
+            connect: () => {
+                throw new Error('cannot reconnect JsonRpcSigner');
+            },
+        });
+        const transaction = createSignerTransactionMachine(connections, signer, CALL);
+
+        transaction.send();
+        await waitForNode(transaction, 'confirmed');
+        expect(asked).toHaveLength(1);
+        transaction.close();
+        close();
+    });
+
+    test('waits in ready for a send request, then sends through the connection and follows the transaction until it is confirmed', async () => {
+        const { connections, ethereumClientOf, close } = await setUp();
+        const { signer, asked, connectedTo } = signerAnswering(sentAs(MINED));
         const transaction = createSignerTransactionMachine(connections, signer, CALL);
 
         expect(await nodesDuring(transaction)).toEqual(new Set(['ready']));
@@ -85,6 +109,9 @@ describe('Ethereum signer transaction machine', () => {
             expect.objectContaining({ transactionHash: MINED, receipt: expect.objectContaining({ status: 1 }) })
         );
         expect(asked).toEqual([expect.objectContaining({ ...CALL, nonce: undefined })]);
+        // The signer sends on the machine's own provider: the connection's client, whose requests take its turns.
+        expect(connectedTo).toHaveLength(1);
+        expect(connectedTo[0]).toBe(ethereumClientOf(transaction));
         transaction.close();
         close();
     });

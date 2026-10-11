@@ -1,5 +1,5 @@
 import { type Address, type Commitment, type Signature } from '@solana/kit';
-import { distinctUntilChanged, isObservable, map, type Observable, of, switchMap } from 'rxjs';
+import { distinctUntilChanged, isObservable, map, type Observable, of, switchMap, take } from 'rxjs';
 import { heldAcrossMoves } from '../../utils/machines.js';
 import { startChainChangesMachine } from '../connection/chainChanges.impl.js';
 import { forSolana$, type Solana, solanaCallsUsable$, solanaSubscriptionsOf } from '../connection/connections.js';
@@ -25,12 +25,12 @@ export type SolanaWatch =
  * The subscription that pushes the watched changes on Solana's websocket:
  * its acknowledgement, then each push.
  *
- * @param subscribe$ A subscription on the websocket.
+ * @param subscribe$ A subscription on the websocket, on the machine's turns.
  * @param watch What counts as a change; every new root when omitted.
  * @returns The subscription.
  */
 function pushes$(
-    subscribe$: ReturnType<typeof solanaSubscriptionsOf>['subscribe$'],
+    subscribe$: <T>(subscribeMethod: string, params: unknown[], unsubscribeMethod: string) => Observable<SubscriptionEvent<T>>,
     watch: SolanaWatch | undefined
 ): Observable<SubscriptionEvent<unknown>> {
     if (watch === undefined)
@@ -80,7 +80,7 @@ function polledAddress$(watch: SolanaWatch | undefined): Observable<Address> | u
 /**
  * Starts following whether Solana changes, as the chain changes graph
  * (`ChainChangesGraph`) describes: subscribed on Solana's websocket while it
- * is open, else polling through its RPC. Without a watch, every new
+ * serves, else polling through its RPC. Without a watch, every new
  * finalized root is a change; with one, what it names (`SolanaWatch`). A
  * poll compares the latest finalized slot with the last one polled, and for
  * an address, the slot of its newest finalized transaction: a transaction
@@ -97,15 +97,30 @@ export function createSolanaChangesMachine(solana: Solana, watch?: SolanaWatch) 
     return startChainChangesMachine({
         subscribable$: subscribable$.pipe(map((open) => (open ? ['websocket' as const] : []))),
         // One subscription, kept while a push loops back to `subscribed`.
-        pushesOn: { websocket: pushes$(subscribe$, watch).pipe(heldAcrossMoves()) },
-        poll$: (lastSlot) =>
-            forSolana$(solana, (rpc) => finalizedSlot$(rpc)).pipe(
+        pushesOn: (started$) => ({
+            websocket: started$
+                .pipe(
+                    take(1),
+                    switchMap((machine) =>
+                        pushes$(
+                            <T>(subscribeMethod: string, params: unknown[], unsubscribeMethod: string) =>
+                                subscribe$<T>(subscribeMethod, params, unsubscribeMethod, machine),
+                            watch
+                        )
+                    )
+                )
+                .pipe(heldAcrossMoves()),
+        }),
+        poll$: (lastSlot, machine) =>
+            forSolana$(solana, machine, (rpc) => finalizedSlot$(rpc)).pipe(
                 switchMap((latest) => {
                     if (lastSlot === undefined) return of({ lastPolled: latest, changed: false });
                     if (latest <= lastSlot) return of(undefined);
                     if (address$ === undefined) return of({ lastPolled: latest, changed: true });
                     return address$.pipe(
-                        switchMap((address) => forSolana$(solana, (rpc) => newestTransactionSlot$(rpc, address))),
+                        switchMap((address) =>
+                            forSolana$(solana, machine, (rpc) => newestTransactionSlot$(rpc, address))
+                        ),
                         map((slot) => ({ lastPolled: latest, changed: slot !== undefined && slot > lastSlot }))
                     );
                 })

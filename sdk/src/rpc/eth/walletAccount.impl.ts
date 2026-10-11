@@ -4,7 +4,8 @@ import { catchError, defer, filter, map, NEVER, type Observable, of, Subject, sw
 import { type ProofRequestConnections } from '../../proofRequest/connectedRead.js';
 import { type RequestOutcome, requestOutcomes, stateOnEntry$ } from '../../utils/machines.js';
 import { messageOf } from '../../utils/messageOf.js';
-import { walletProviderOf$ } from '../connection/connections.js';
+import { SERVING_NODES } from '../connection/connection.js';
+import { walletEventsOf$, walletProviderOf$ } from '../connection/connections.js';
 import { type ReadRetryBackoff, startReadThroughConnectionsMachine, dueOn } from '../connection/readThroughConnections.impl.js';
 import { eip1193Event$, requestErrorCode, USER_REJECTED_REQUEST } from './eip1193.js';
 import { NoWalletConfiguredError } from './errors.js';
@@ -28,10 +29,12 @@ type ShareOutcome = RequestOutcome<typeof WalletAccountGraph, 'shareAccepted' | 
 export function createWalletAccountMachine(connections: ProofRequestConnections, backoff: ReadRetryBackoff = {}) {
     const walletNeed = 'ethereum.wallet' as const;
     const shareAccount$ = new Subject<void>();
-    const walletProvider$ = walletProviderOf$(connections.ethereum);
-    const accountsChanged$ = walletProvider$.pipe(switchMap((provider) => eip1193Event$(provider, 'accountsChanged')));
+    const accountsChanged$ = walletEventsOf$(connections.ethereum).pipe(
+        switchMap((events) => eip1193Event$(events, 'accountsChanged'))
+    );
+    // The wallet stops serving: `overwhelmed` still serves, at the rate its grants allow.
     const walletLeftReady$ = (connections.ethereum.wallet.connection?.state$ ?? NEVER).pipe(
-        filter(({ node }) => node !== 'ready')
+        filter(({ node }) => !SERVING_NODES.includes(node))
     );
 
     const machine = startReadThroughConnectionsMachine(WalletAccountGraph, {
@@ -48,14 +51,16 @@ export function createWalletAccountMachine(connections: ProofRequestConnections,
         refreshOn: () => dueOn(accountsChanged$),
         needs: [walletNeed],
         backoff,
-        ownTransitions: (_read$, state$) => {
+        ownTransitions: (_read$, state$, started$) => {
             const entered$ = stateOnEntry$(state$);
-            // The outcome edges of `askingToShareAccount` share one request per entry into it.
+            // The outcome edges of `askingToShareAccount` share one request per entry into it, on this machine's turn.
             const taking = requestOutcomes(
                 state$,
                 'askingToShareAccount',
                 (data: ResolveNodeData<typeof WalletAccountGraph.nodes, 'askingToShareAccount'>): Observable<ShareOutcome> =>
-                    walletProvider$.pipe(
+                    started$.pipe(
+                        take(1),
+                        switchMap((machine) => walletProviderOf$(connections.ethereum, machine)),
                         take(1),
                         switchMap((provider) => defer(() => provider.request({ method: 'eth_requestAccounts' }))),
                         map(

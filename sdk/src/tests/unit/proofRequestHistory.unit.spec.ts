@@ -16,6 +16,7 @@ import {
     waitForNode,
     TARGET_A,
     TARGET_B,
+    testSubscriber,
     type FakeProofRequest,
 } from '../testUtils.js';
 
@@ -62,7 +63,7 @@ describe('proof request history reads', () => {
     test('a page classifies each request against the committed batches', async () => {
         const { connections, close } = await setUp();
         const page = await firstValueFrom(
-            fetchProofRequestHistoryPage$(connectedReadClientsOf(connections, 'logs'), addresses, {
+            fetchProofRequestHistoryPage$(connectedReadClientsOf(connections, testSubscriber(), 'logs'), addresses, {
                 target: TARGET_A,
                 fromBlock: 0,
                 order: 'asc',

@@ -50,7 +50,7 @@ stage$.subscribe(({ stage, sinceMs }) => console.log(`${stage} since ${new Date(
 
 Everything that changes over time is a state machine built with [YState](https://github.com/yaw-rx/ystate), a small library of finite state machines over RxJS. A machine is a graph: named states (nodes), each carrying its own data, and the moves between them (edges), each made when something happens, such as a read finishing or a timer firing. The graphs in this README are the machines' exact definitions, and each machine's state type is derived from its graph (`StateUnion<typeof Graph.nodes>`).
 
-The transports' machines, the connections' status machines and every reading machine are returned running, with a `close()` that moves the machine to its `closed` state and ends its streams. A reading machine is the running machine itself, with its controls on it: `close()`, `retry()` to read again at once while failed, and its own, such as the history's `loadMore()`. The unprocessed request's machine is returned ready to run: `.close().start(firstState)` runs it, and `.stop()` ends it.
+The transports' machines and every reading machine are returned running, with a `close()` that moves the machine to its `closed` state and ends its streams. A reading machine is the running machine itself, with its controls on it: `close()`, `retry()` to read again at once while failed, and its own, such as the history's `loadMore()`. The unprocessed request's machine is returned ready to run: `.close().start(firstState)` runs it, and `.stop()` ends it.
 
 A running machine has:
 
@@ -110,42 +110,45 @@ const { network, ethereum, solana, nori, close } = createConnections({
 
 Every call with the same options gets the same connections: the same transports, machines and Nori websocket. Nori runs several websocket servers, each with its own cached state, so the whole app reads Nori through one socket. Each caller's `close()` releases its hold, and the connections close once every caller has closed.
 
-What comes back has one object per transport, and a status per chain:
+What comes back has one object per transport:
 
 | Object               | Has                                                                                          |
 | -------------------- | -------------------------------------------------------------------------------------------- |
-| `network`            | `connection`, `status`                                                                       |
-| `ethereum`           | `status`, `http`, `websocket`, `wallet`                                                      |
-| `ethereum.http`      | `connection`, `close()`                                                                      |
-| `ethereum.websocket` | `connection`, `socket`, `close()`                                                            |
-| `ethereum.wallet`    | `connection`, `account`, `ready$(): Observable<BrowserProvider>`, `chooseWallet(uuid)`, `switchToExpectedChain()`, `close()` |
-| `solana`             | `status`, `http`, `websocket`, `wallet`                                                      |
-| `solana.http`        | `connection`, `close()`                                                                      |
-| `solana.websocket`   | `connection`, `socket`, `close()`                                                            |
-| `solana.wallet`      | `connection`, `ready$(): Observable<TransactionSendingSigner>`, `chooseWallet(name)`, `connect()`, `disconnect()`, `close()` |
-| `nori`               | `status`, `websocket`, `transitions`, `bridgeState$`, `finality$`                            |
+| `network`            | `connection`                                                                                 |
+| `ethereum`           | `http`, `websocket`, `wallet`                                                                |
+| `ethereum.http`      | `connection`, `load$`, `close()`                                                             |
+| `ethereum.websocket` | `connection`, `socket`, `load$`, `close()`                                                   |
+| `ethereum.wallet`    | `connection`, `account`, `load$`, `ready$(machine): Observable<BrowserProvider>`, `chooseWallet(uuid)`, `switchToExpectedChain()`, `close()` |
+| `solana`             | `http`, `websocket`, `wallet`                                                                |
+| `solana.http`        | `connection`, `load$`, `close()`                                                             |
+| `solana.websocket`   | `connection`, `socket`, `load$`, `close()`                                                   |
+| `solana.wallet`      | `connection`, `ready$(machine): Observable<TransactionSendingSigner>`, `chooseWallet(name)`, `connect()`, `disconnect()`, `close()` |
+| `nori`               | `websocket`, `transitions`, `bridgeState$`, `finality$`                                      |
 
-`connection` is the transport's running machine (`undefined` for an Ethereum transport the app left out). Reads go through the machines below, never through a transport directly. The wallet's `ready$()` emits its `BrowserProvider` once, when the wallet is ready, to sign with; otherwise it errors at once with `ConnectionNotReadyError`, whose `notReady` lists the wallet's state, or with `NoWalletConfiguredError` when the app gave no wallet: a setup mistake, not a state to wait out. The Solana wallet's `ready$()` emits a `@solana/kit` sending signer over the account the user shares, the same way (`NoSolanaWalletConfiguredError` without one). Wallets announce themselves on the window; outside a browser, `walletEvents` names another `EventTarget`. `nori.bridgeState$` and `nori.finality$` are Nori's `state.bridge` and `state.eth`, each stamped with when it arrived (`{ value, atMs }`), so a time inside it ages from its arrival. `close()` on the top level releases the connections.
+`connection` is the transport's running machine (`undefined` for an Ethereum transport the app left out). An app shows a transport's state, for example a pin per transport, by reading its `connection.state$` directly: the nodes are listed under each transport's machine below. Reads go through the machines below, never through a transport directly. `load$` is each second's count of the requests through the transport (see [Rate limits](#rate-limits)). The wallet's `ready$(machine)` emits its `BrowserProvider` once, when the wallet serves requests, to sign with, its requests on that machine's turns; otherwise it errors at once with `ConnectionNotReadyError`, whose `notReady` lists the wallet's state, or with `NoWalletConfiguredError` when the app gave no wallet: a setup mistake, not a state to wait out. The Solana wallet's `ready$(machine)` emits a `@solana/kit` sending signer over the account the user shares, the same way (`NoSolanaWalletConfiguredError` without one). Wallets announce themselves on the window; outside a browser, `walletEvents` names another `EventTarget`. `nori.bridgeState$` and `nori.finality$` are Nori's `state.bridge` and `state.eth`, each stamped with when it arrived (`{ value, atMs }`), so a time inside it ages from its arrival. `close()` on the top level releases the connections.
 
-### Connection status (`createConnectionStatusMachine`)
+### Rate limits
 
-![Connection status graph](src/rpc/connection/ConnectionStatusGraph.svg)
+Every request to an endpoint, whatever it is for (a first read, a refresh, a retry, a poll, a subscription, a send, a health check), takes a turn at that endpoint: each URL of an http transport, each RPC websocket, and the Ethereum wallet. A machine takes turns; machines take theirs in turn (round robin), so one with many requests waiting does not hold back another.
 
-`network.status`, `ethereum.status`, `solana.status` and `nori.status` each hold a running machine (`connection`) that says whether that connection can serve requests, over its transports in its calls order:
+- While the endpoint answers, requests go at once.
+- When it turns requests away for too many, the transport moves to `overwhelmed`, with `data.ratePerSecond`, the rate its requests now go at: what got through, halved on each further refusal, and one more each second requests wait and none is refused. A request turned away is sent again on its machine's next turn, so no machine ever sees the refusal. `overwhelmed` still serves: everything that gates on `ready` gates on it too. Each change of the rate is a move to `overwhelmed` again.
+- A refusal is HTTP 429, and on Ethereum also JSON-RPC `-32005` ("Limit exceeded", EIP-1474) in the reply, from a node or from the wallet. On Solana `-32005` means the node is unhealthy, which is a failure, not a refusal.
+- A `Retry-After` the endpoint sends holds every request to it until it has passed.
+- The rate is lifted, back to `ready`, only once 30 seconds in a row pass with nothing waiting and nothing refused (`quietSecondsToLift`), so a burst after a lull goes at the rate learned rather than being refused again.
+- Requests asking the same thing (the same method and params) while one waits or is in flight share its answer, whichever machines ask.
+- A request's timeout, and a health check's, run from when it is sent, never while it waits for its turn.
+- With several Solana URLs, one that answers nothing for a health check's timeout while it refuses every request is left for the next (`movedOnWhileTurnedAway`): what waited there fails as never sent, and the machines read again through the next URL. With one URL there is nowhere to go, and requests wait their turns.
 
-- `connected`: a transport is up; `data.transport` names the first one up in the order (`ethereum.http`, `solana.http`, …).
-- `unsure`: no transport is up, and one has no outcome yet or has failed only once in a row and is checking again.
-- `down`: no transport is up or unsure; `data.reason` is the state of the first transport's machine (`unreachable`, `offline`, `wrongNetwork`, …).
-
-Any of the three moves to any other as the transports change. An app shows these as they are, e.g. green, blue and red. A wallet's own status comes from `walletStatus('ethereum.wallet')` over `ethereum.wallet.connection.state$`, and `createConnectionStatusMachine` builds a status machine over any transports, with `httpStatus`, `websocketStatus`, `walletStatus` and `networkStatus` turning each transport's states into statuses.
+Each transport's `load$` emits each second's count: `perSubscriber` (by machine), `total`, `tooMany` (refused), `queued` (still waiting) and `ratePerSecond` (`Infinity` while unlimited). Two senders are not paced: the Solana wallet, whose Wallet Standard gives no signal of a limit, and Nori's websocket, which refuses nothing.
 
 ### Transport order per request kind
 
-Calls, log queries and subscriptions can each go over more than one Ethereum transport, in the order the app gives in `order`; the SDK sets none. When only one configured transport can serve a kind of request, that one is used; when several can and no order is given, `createConnections` throws. Signing only ever goes through the wallet: `ethereum.wallet.ready$()` gives its `BrowserProvider`, whose `getSigner()` signs. On Solana each kind of request has one transport: calls over http, subscriptions over the websocket.
+Calls, log queries and subscriptions can each go over more than one Ethereum transport, in the order the app gives in `order`; the SDK sets none. When only one configured transport can serve a kind of request, that one is used; when several can and no order is given, `createConnections` throws. Signing only ever goes through the wallet: `ethereum.wallet.ready$(machine)` gives its `BrowserProvider`, whose `getSigner()` signs. On Solana each kind of request has one transport: calls over http, subscriptions over the websocket.
 
 Every machine and stream below takes the connections or a chain object (`ethereum`, `solana`, `nori`) and picks the transport itself. A read runs on the first ready transport in its chain's calls order, or logs order for Ethereum's log queries. When a request in it fails to reach its node, it tells that transport and runs the read again from the start on the next ready one, so one run never mixes nodes. An app's own values are read the same way, as machines (see [Custom read machines](#custom-read-machines-startreadthroughconnectionsmachine)).
 
-The machines read again when a chain changes (see [Chain change machines](#chain-change-machines-createchainchangesmachine-createsolanachangesmachine)). On Ethereum they subscribe on the first ready transport in the subscriptions order (the websocket, or the wallet's own `eth_subscribe` where the wallet supports it), move to the next when that one stops being ready and back when a higher one recovers, and while none is ready poll through the calls order. On Solana they subscribe on the websocket while it is open, and poll through http while it is not.
+The machines read again when a chain changes (see [Chain change machines](#chain-change-machines-createchainchangesmachine-createsolanachangesmachine)). On Ethereum they subscribe on the first ready transport in the subscriptions order (the websocket, or the wallet's own `eth_subscribe` where the wallet supports it), move to the next when that one stops being ready and back when a higher one recovers, and while none is ready poll through the calls order. On Solana they subscribe on the websocket while it serves, and poll through http while it does not.
 
 ### Network connectivity machine
 
@@ -157,34 +160,47 @@ Whether the device can reach the internet, in a browser or in Node. It checks fo
 
 ![HTTP connection graph](src/rpc/connection/HttpConnectionGraph.svg)
 
-Ethereum's and Solana's http transports. `ready` means a health check passed on the expected network: for Ethereum `eth_chainId` then `eth_blockNumber` (`data.health.blockNumber`), for Solana `getGenesisHash` (the cluster) then `getSlot` (`data.health.slot`). While ready it checks again in the background. `unreachable` and `wrongNetwork` (the endpoint serves another chain or cluster; `data.found` and `data.expected` say which) check again after a wait that doubles each time, so an endpoint that comes back, or is fixed, recovers by itself. With several Solana endpoints each failed check moves on to the next, so one that is down or rate-limited is skipped; `data.url` says which endpoint each state is about. A request that fails to reach the node, or takes longer than `requests.timeoutMs`, makes it check at once.
+Ethereum's and Solana's http transports. `connecting` checks the endpoint; `ready` means the check passed on the expected network: for Ethereum `eth_chainId` then `eth_blockNumber` (`data.health.blockNumber`), for Solana `getGenesisHash` (the cluster) then `getSlot` (`data.health.slot`). While ready it checks again in the background. `waitingToRetry` (the endpoint did not answer) and `wrongNetwork` (it serves another chain or cluster; `data.found` and `data.expected` say which) connect again after a wait that doubles each time, so an endpoint that comes back, or is fixed, recovers by itself. `overwhelmed` serves at the rate the endpoint takes (see [Rate limits](#rate-limits)). With several Solana endpoints each failed check moves on to the next, and so does one that refuses every request; `data.url` says which endpoint each state is about. A request that fails to reach the node, or takes longer than `requests.timeoutMs` once sent, makes it check at once.
 
 ### WebSocket transport machine
 
-![WebSocket connection graph](src/rpc/connection/WebSocketConnectionGraph.svg)
+Ethereum's, Solana's and Nori's websockets, each on the graph that has the states it can reach:
 
-Ethereum's, Solana's and Nori's websockets. `open` means the socket is connected; a socket that closes, errors or stops answering its heartbeat (Nori's ping and pong) drops to `reconnecting`, which connects again after a wait that doubles each time. A subscription is sent again every time the socket opens. `gaveUp` is reached only when `retries.maxAttempts` is set and runs out; the socket's `retry()` starts again. Messages sent while connecting are queued until the socket opens. Without a websocket URL of its own, Solana's websocket follows http: it connects to the URL whose health check passed, over wss, and reconnects when http moves on to another endpoint.
+- Nori's websocket is `WebSocketConnectionGraph`: its server serves no network to check and refuses nothing.
+
+  ![WebSocket connection graph](src/rpc/connection/WebSocketConnectionGraph.svg)
+
+- Solana's is `RateLimitedWebSocketGraph`: it is rate-limited, and a Solana node's websocket serves subscriptions only, so its cluster cannot be asked over it. Its check is one subscription the node acknowledges (`slotSubscribe`, then `slotUnsubscribe`); its cluster is checked by http, whose checked URL it follows unless the app gives its own.
+
+  ![Rate-limited websocket graph](src/rpc/connection/RateLimitedWebSocketGraph.svg)
+
+- Ethereum's is `RateLimitedWebSocketWithWrongNetworkGraph`: rate-limited, and checked with `eth_chainId` then `eth_blockNumber`, so a socket on another chain is `wrongNetwork`, which connects again on a fresh socket after a wait that doubles each time.
+
+  ![Rate-limited websocket with wrong network graph](src/rpc/connection/RateLimitedWebSocketWithWrongNetworkGraph.svg)
+
+Their states are http's (see [HTTP transport machine](#http-transport-machine)); `connecting` opens a socket and checks it. A socket that closes, errors or stops answering its heartbeat drops to `waitingToRetry`. The heartbeat is a ping sent once nothing has been received for a health check interval, so a busy socket sends none; nothing received for two intervals is a drop. Subscriptions are made again each time the socket comes to serve, and an unsubscribe goes only to the socket the subscription lives on. A subscribe that gets no reply makes the socket check itself again, and the subscription is made again once it serves. `gaveUp` is reached only when `retries.maxAttempts` is set and runs out; the socket's `retry()` starts again. Messages sent while connecting are queued until the socket opens. Without a websocket URL of its own, Solana's websocket follows http: it connects to the URL whose health check passed, over wss, and reconnects when http moves on to another endpoint.
 
 ### Ethereum wallet machine (`ethereum.wallet`)
 
 ![Ethereum wallet graph](src/rpc/eth/EthereumWalletGraph.svg)
 
-The user's wallet, found through EIP-6963 (with the older `window.ethereum` as a fallback). Its `checking`, `ready`, `wrongNetwork`, `unreachable`, `offline` and `closed` states, with their moves, are the same checked connection as http's (`healthCheckedOf`), each carrying the wallet, so the app gates on it exactly as on http; `data.url` is the wallet's reverse-DNS id (e.g. `io.metamask`). Unlike an RPC URL, a wallet on another chain is not checked again on a timer: it waits for the user to change chain.
+The user's wallet, found through EIP-6963 (with the older `window.ethereum` as a fallback). Its `connecting`, `ready`, `waitingToRetry`, `offline` and `closed` states (`connectionOf`), its `wrongNetwork` (`wrongNetworkOf`), its check while ready (`backgroundCheckedEdges`) and its `overwhelmed` (`pacedOf`), with their moves, are the same as http's, each carrying the wallet, so the app gates on it exactly as on http; `data.url` is the wallet's reverse-DNS id (e.g. `io.metamask`). Unlike an RPC URL, a wallet on another chain is not checked again on a timer: it waits for the user to change chain.
 
 | State                 | What it means                                                                        | What the app can do                                                                                   |
 | --------------------- | ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
 | `lookingForWallets`   | Asking installed wallets to announce themselves.                                     | Wait.                                                                                                 |
 | `noWalletFound`       | No wallet is installed. A wallet installed or enabled later is picked up.            | Ask the user to install one.                                                                          |
 | `choosingWallet`      | Several wallets are installed; `data.wallets` lists them (name, icon).               | Let the user pick, then `ethereum.wallet.chooseWallet(uuid)`.                                         |
-| `checking`            | Asking the wallet for its chain, then its latest block.                              | Wait.                                                                                                 |
+| `connecting`          | Asking the wallet for its chain, then its latest block.                              | Wait.                                                                                                 |
 | `ready`               | Ready to use; `data.health.blockNumber` is the latest block.                         | Nothing.                                                                                              |
+| `overwhelmed`         | Ready to use, at `data.ratePerSecond`: the wallet turned requests away for too many. | Nothing; requests wait their turns.                                                                   |
 | `wrongNetwork`        | The wallet is on chain `data.found`, not `data.expected`.                            | Ask the user to switch, or call `ethereum.wallet.switchToExpectedChain()` to have the wallet ask them. |
 | `askingToSwitchChain` | The wallet is showing the switch request.                                            | Ask the user to confirm it.                                                                           |
 | `switchDeclined`      | The user said no. The wallet is not asked again until they change chain themselves.  | Tell them they can switch in their wallet whenever they're ready.                                     |
-| `unreachable`         | The wallet did not answer, or disconnected; it is asked again after a wait.          | Wait; the wallet's status is `down`.                                                                  |
+| `waitingToRetry`      | The wallet did not answer, or disconnected; it is asked again after a wait.          | Wait.                                                                                                 |
 | `offline`             | The device is offline.                                                               | Wait.                                                                                                 |
 
-A switch request the wallet fails for another reason (e.g. it doesn't know the chain), or leaves unanswered for `switchTimeoutMs` (60 s by default), returns to `wrongNetwork` with the reason in `data.lastSwitchError`, and the app may ask again. Any chain change, in any state with a wallet, checks again. The wallet's `disconnect` moves every state with a wallet to `unreachable`, and going offline moves each of them to `offline`.
+A switch request the wallet fails for another reason (e.g. it doesn't know the chain), or leaves unanswered for `switchTimeoutMs` (60 s by default), returns to `wrongNetwork` with the reason in `data.lastSwitchError`, and the app may ask again. Any chain change, in any state with a wallet, connects again. The wallet's `disconnect` moves every state with a wallet to `waitingToRetry`, and going offline moves each of them to `offline`.
 
 ```ts
 ethereum.wallet.connection?.state$.subscribe(({ node }) => {
@@ -198,7 +214,7 @@ ethereum.wallet.connection?.state$.subscribe(({ node }) => {
 
 ![Wallet account graph](src/rpc/eth/WalletAccountGraph.svg)
 
-`ethereum.wallet.account` is the account the wallet shares with the app, read through the wallet alone: `eth_accounts`, which never prompts the user, read again on the wallet's `accountsChanged`. `current` holds `data.account`, `undefined` while none is shared. While the wallet is not `ready`, it waits for it (`waitingOn: ['ethereum.wallet']`).
+`ethereum.wallet.account` is the account the wallet shares with the app, read through the wallet alone: `eth_accounts`, which never prompts the user, read again on the wallet's `accountsChanged`. `current` holds `data.account`, `undefined` while none is shared. While the wallet does not serve (`ready` or `overwhelmed`), it waits for it (`waitingOn: ['ethereum.wallet']`).
 
 | State                  | What it means                                                                                  | What the app can do                                              |
 | ---------------------- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
@@ -266,33 +282,38 @@ They only exist on Nori's websocket, so they have no polling; its state, timings
 
 ### Solana bridge state account (`createBridgeStateMachine`)
 
-![Bridge state graph](src/proofQueue/BridgeStateGraph.svg)
+[`BridgeStateGraph`](src/proofQueue/BridgeStateGraph.svg) `createBridgeStateMachine({ ethereum, solana }, programAddress?)` follows the same semantics as every [read machine](#read-machines-readthroughconnectionsof).
 
-`createBridgeStateMachine({ ethereum, solana }, programAddress?)` reads the bridge program's state account (queue cursor, batch count, latest proven head and root) through Solana, holds it in `current` as `data.bridgeState`, and reads it again each time the account changes. `programAddress` defaults to the Nori program's address.
+- It reads the bridge program's state account (queue cursor, batch count, latest proven head and root) through Solana and holds it in `current` as `data.bridgeState`. `programAddress` defaults to the Nori program's address.
+- It reads the account again each time the account changes.
 
 ### Ethereum latest and finalized blocks (`createEthereumBlocksMachine`)
 
-![Ethereum blocks graph](src/proofQueue/EthereumBlocksGraph.svg)
+[`EthereumBlocksGraph`](src/proofQueue/EthereumBlocksGraph.svg) `createEthereumBlocksMachine({ ethereum, solana })` follows the same semantics as every [read machine](#read-machines-readthroughconnectionsof).
 
-`createEthereumBlocksMachine({ ethereum, solana })` reads Ethereum's latest and finalized blocks through Ethereum, holds them in `current` as `data.latestBlock` and `data.finalizedBlock`, and reads them again on each new block. A proof request is proven only once its block is finalized.
+- It reads Ethereum's latest and finalized blocks through Ethereum and holds them in `current` as `data.latestBlock` and `data.finalizedBlock`. A proof request is proven only once its block is finalized.
+- It reads them again on each new block.
 
 ### Committed proof queue batches (`createCommittedProofQueueBatchesMachine`)
 
-![Committed proof queue batches graph](src/proofQueue/CommittedProofQueueBatchesGraph.svg)
+[`CommittedProofQueueBatchesGraph`](src/proofQueue/CommittedProofQueueBatchesGraph.svg) `createCommittedProofQueueBatchesMachine({ ethereum, solana }, fromIndex?, programAddress?)` follows the same semantics as every [read machine](#read-machines-readthroughconnectionsof).
 
-`createCommittedProofQueueBatchesMachine({ ethereum, solana }, fromIndex?, programAddress?)` reads each proof queue batch the bridge commits from its batch accounts, and reads again each time the bridge's state account changes. `current` holds `data.committed`, the batches committed since the read before, oldest first (each with its index, account address, root, cursors and output block). `data.batchCount` is the batch the next read starts from: `fromIndex` at first (default: the bridge's batch count), then how many batches the bridge held at the last read, so every batch arrives once.
+- It reads each proof queue batch the bridge commits from its batch accounts. `current` holds `data.committed`, the batches committed since the read before, oldest first (each with its index, account address, root, cursors and output block). `data.batchCount` is the batch the next read starts from: `fromIndex` at first (default: the bridge's batch count), then how many batches the bridge held at the last read, so every batch arrives once.
+- It reads again each time the bridge's state account changes.
 
 ### Proof queue head (`createProofQueueHeadMachine`)
 
-![Proof queue head graph](src/proofQueue/ProofQueueHeadGraph.svg)
+[`ProofQueueHeadGraph`](src/proofQueue/ProofQueueHeadGraph.svg) `createProofQueueHeadMachine({ ethereum, solana }, proofQueueAddress)` follows the same semantics as every [read machine](#read-machines-readthroughconnectionsof).
 
-`createProofQueueHeadMachine({ ethereum, solana }, proofQueueAddress)` reads the queue's `head` (how many proof requests have ever been enqueued, which is also the next request's id) through Ethereum, holds it in `current` as `data.head`, and reads it again on each `ProofRequested` the queue emits.
+- It reads the queue's `head` (how many proof requests have ever been enqueued, which is also the next request's id) through Ethereum and holds it in `current` as `data.head`.
+- It reads it again on each `ProofRequested` the queue emits.
 
 ### Ethereum transaction receipt (`createTransactionReceiptMachine`)
 
-![Transaction receipt graph](src/rpc/connection/TransactionReceiptGraph.svg)
+[`TransactionReceiptGraph`](src/rpc/connection/TransactionReceiptGraph.svg) `createTransactionReceiptMachine({ ethereum, solana }, transactionHash)` follows the same semantics as every [read machine](#read-machines-readthroughconnectionsof).
 
-`createTransactionReceiptMachine({ ethereum, solana }, transactionHash)` reads an Ethereum transaction's receipt and reads it again on each new block until the transaction is mined. Every state holds the transaction in `data.transactionHash`; `current` holds `data.receipt`: `undefined` until mined, then `{ transactionHash, blockNumber, status }`, which is not read again.
+- It reads an Ethereum transaction's receipt. Every state holds the transaction in `data.transactionHash`; `current` holds `data.receipt`: `undefined` until mined, then `{ transactionHash, blockNumber, status }`.
+- It reads it again on each new block until the transaction is mined, and never after.
 
 ### Solana signature status (`createSignatureStatusMachine`)
 
@@ -304,15 +325,17 @@ With `lastValidBlockHeight`, the block height after which the transaction's bloc
 
 ### Solana account (`createSolanaAccountMachine`)
 
-![Solana account graph](src/solana/SolanaAccountGraph.svg)
+[`SolanaAccountGraph`](src/solana/SolanaAccountGraph.svg) `createSolanaAccountMachine({ ethereum, solana }, address)` follows the same semantics as every [read machine](#read-machines-readthroughconnectionsof).
 
-`createSolanaAccountMachine({ ethereum, solana }, address)` reads an account through Solana and reads it again each time its finalized state changes. Every state holds `data.address`; `current` holds `data.account` (`lamports`, `owner`, `data` in base64, `executable`, `space`), `undefined` while no account exists at the address.
+- It reads an account through Solana. Every state holds `data.address`; `current` holds `data.account` (`lamports`, `owner`, `data` in base64, `executable`, `space`), `undefined` while no account exists at the address.
+- It reads it again each time its finalized state changes.
 
 ### Solana transaction logs by address (`createTransactionLogsMachine`)
 
-![Transaction logs graph](src/solana/TransactionLogsGraph.svg)
+[`TransactionLogsGraph`](src/solana/TransactionLogsGraph.svg) `createTransactionLogsMachine({ ethereum, solana }, address)` follows the same semantics as every [read machine](#read-machines-readthroughconnectionsof).
 
-`createTransactionLogsMachine({ ethereum, solana }, address)` gives the logs of each finalized transaction mentioning an address, such as a program's, read again on each new one. The first read finds the newest transaction there is (`data.lastSignature`); each later read gives the transactions after the last one read in `data.transactions`, oldest first, each with its `signature`, `slot`, `err` (`null` when it succeeded) and `logs`, so every transaction from the first read on arrives once.
+- It reads the logs of each finalized transaction mentioning an address, such as a program's. The first read finds the newest transaction there is (`data.lastSignature`); each later read gives the transactions after the last one read in `data.transactions`, oldest first, each with its `signature`, `slot`, `err` (`null` when it succeeded) and `logs`, so every transaction from the first read on arrives once.
+- It reads again on each new finalized transaction mentioning the address.
 
 ## Proof request state (`createProofRequestStateMachine`)
 
@@ -334,9 +357,10 @@ Lost connections and failed reads are the waiting and failed states above. To re
 
 ### Proof request witness (`createProofRequestWitnessMachine`)
 
-![Proof request witness graph](src/proofRequest/ProofRequestWitnessGraph.svg)
+Once the snapshot is `proofAvailable`, [`ProofRequestWitnessGraph`](src/proofRequest/ProofRequestWitnessGraph.svg) `createProofRequestWitnessMachine(connections, proofQueueAddress, proofAvailable)` follows the same semantics as every [read machine](#read-machines-readthroughconnectionsof).
 
-Once the snapshot is `proofAvailable`, `createProofRequestWitnessMachine(connections, proofQueueAddress, proofAvailable)` reads every request in its batch from Ethereum's logs, rebuilds the batch's Merkle tree, and checks it against the root committed on Solana (a mismatch is a failed read, `ProofRequestWitnessRootMismatchError`). `current` holds `data.witness`, the request's leaf, its bottom-up path and the root, and `data.verifiedWitness`, the same in the shape the program's `mint` takes (`VerifiedRequestWitnessInput`), for `mintCall$`. A committed batch never changes, so the witness is never read again.
+- It reads every request in the batch from Ethereum's logs, rebuilds the batch's Merkle tree, and checks it against the root committed on Solana (a mismatch is a failed read, `ProofRequestWitnessRootMismatchError`). `current` holds `data.witness`, the request's leaf, its bottom-up path and the root, and `data.verifiedWitness`, the same in the shape the program's `mint` takes (`VerifiedRequestWitnessInput`), for `mintCall$`.
+- It never reads the witness again, because a committed batch never changes.
 
 ```ts
 import { filter, map, switchMap, take } from 'rxjs';
@@ -385,15 +409,17 @@ const witness$ = witnessState$.pipe(
 
 ### Proof request of a transaction (`createProofRequestOfTransactionMachine`)
 
-![Proof request of transaction graph](src/proofRequest/ProofRequestOfTransactionGraph.svg)
+[`ProofRequestOfTransactionGraph`](src/proofRequest/ProofRequestOfTransactionGraph.svg) `createProofRequestOfTransactionMachine({ ethereum, solana }, proofQueueAddress, transactionHash)` follows the same semantics as every [read machine](#read-machines-readthroughconnectionsof).
 
-`createProofRequestOfTransactionMachine({ ethereum, solana }, proofQueueAddress, transactionHash)` reads the proof request a transaction enqueued (its id, target, slot key and block) and reads it again on each new block until the transaction is mined. Every state holds `data.transactionHash`; `current` holds `data.proofRequest`, `undefined` until mined, and never read again after.
+- It reads the proof request a transaction enqueued (its id, target, slot key and block). Every state holds `data.transactionHash`; `current` holds `data.proofRequest`, `undefined` until mined.
+- It reads it again on each new block until the transaction is mined, and never after.
 
 ### Proof request block time (`createProofRequestBlockTimeMachine`)
 
-![Proof request block time graph](src/proofRequest/ProofRequestBlockTimeGraph.svg)
+[`ProofRequestBlockTimeGraph`](src/proofRequest/ProofRequestBlockTimeGraph.svg) `createProofRequestBlockTimeMachine({ ethereum, solana }, blockNumber)` follows the same semantics as every [read machine](#read-machines-readthroughconnectionsof).
 
-`createProofRequestBlockTimeMachine({ ethereum, solana }, blockNumber)` reads when the Ethereum block that enqueued a request was produced, once: a produced block's time never changes. Every state holds `data.blockNumber`; `current` holds `data.timestampMs`. The request's age is the time since `timestampMs`.
+- It reads when the Ethereum block that enqueued a request was produced. Every state holds `data.blockNumber`; `current` holds `data.timestampMs`. The request's age is the time since `timestampMs`.
+- It never reads it again, because a produced block's time never changes.
 
 ### Unprocessed proof request progress (`createUnprocessedProofRequestStateMachine`)
 
@@ -405,11 +431,12 @@ Nori creates a job on each Ethereum finality transition, one epoch (`ETHEREUM_EP
 
 ## Proof queue batches and waiting requests (`createProofQueueBatchesMachine`)
 
-![Proof queue batches graph](src/proofQueue/ProofQueueBatchesGraph.svg)
+[`ProofQueueBatchesGraph`](src/proofQueue/ProofQueueBatchesGraph.svg) `createProofQueueBatchesMachine` follows the same semantics as every [read machine](#read-machines-readthroughconnectionsof).
 
-`createProofQueueBatchesMachine` keeps a live view of the bridge's newest proof queue batches and the requests no batch covers yet, for every submitting address or one (`target`). The view, `data.view`, holds `batches` (newest first, each with the target's request ids in it as `matching`), `waiting` (oldest first), `batchCount`, `queueCursor`, and Ethereum's `finalizedBlock` and `latestBlock`.
+- It reads a live view of the bridge's newest proof queue batches and the requests no batch covers yet, for every submitting address or one (`target`). The view, `data.view`, holds `batches` (newest first, each with the target's request ids in it as `matching`), `waiting` (oldest first), `batchCount`, `queueCursor`, and Ethereum's `finalizedBlock` and `latestBlock`.
+- It reads the view again when the bridge's batch count or queue cursor changes, on each Ethereum block past the view, when a source waits or fails, and on each recheck signal.
 
-The bridge's state and Ethereum's blocks come from their machines, which the app passes in (`sources`) and can share with other views. The view stays in `loading` until both hold a value, then reads; a source that has failed fails the read. Like every reading machine, it waits for its own chains in `waitingForConnectionWhile…`. It refreshes when the bridge's batch count or queue cursor changes, on each Ethereum block past the view, when a source waits or fails, and on each recheck signal. `data.target` is the submitting address it is filtered on, its starting data.
+The bridge's state and Ethereum's blocks come from their machines, which the app passes in (`sources`) and can share with other views. The view stays in `loading` until both hold a value, then reads; a source that has failed fails the read. `data.target` is the submitting address it is filtered on, its starting data.
 
 `sortWaitingProofRequests(waiting, finalizedBlock, job?)` sorts the waiting requests into three sets, each oldest first: those whose block is not finalized yet, those finalized and scheduled for a later job, and those in the job Nori is running now. The first two come from Ethereum and Solana alone. Telling the job Nori is running apart from the later ones needs Nori's `state.bridge`; without it, every finalized request is scheduled.
 
@@ -443,9 +470,10 @@ const waiting$ = combineLatest([
 
 ### Proof queue batch requests (`createProofQueueBatchRequestsMachine`)
 
-![Proof queue batch requests graph](src/proofQueue/ProofQueueBatchRequestsGraph.svg)
+[`ProofQueueBatchRequestsGraph`](src/proofQueue/ProofQueueBatchRequestsGraph.svg) `createProofQueueBatchRequestsMachine(connections, proofQueueAddress, batch, query)` follows the same semantics as every [read machine](#read-machines-readthroughconnectionsof).
 
-`createProofQueueBatchRequestsMachine(connections, proofQueueAddress, batch, query)` reads one committed batch's requests (the target's only, when given) over the batch's own block and request id range. A committed batch never changes, so they are never read again.
+- It reads one committed batch's requests (the target's only, when given) over the batch's own block and request id range.
+- It never reads them again, because a committed batch never changes.
 
 ## Proof requests by submitting address
 
@@ -497,9 +525,10 @@ It shows the newest `count` requests in `data.view` and keeps them current: new 
 
 ### Proof request counts (`createProofRequestCountsMachine`)
 
-![Proof request counts graph](src/proofRequest/ProofRequestCountsGraph.svg)
+[`ProofRequestCountsGraph`](src/proofRequest/ProofRequestCountsGraph.svg) `createProofRequestCountsMachine({ ethereum, solana }, { proofQueueAddress }, { target, fromBlock })` follows the same semantics as every [read machine](#read-machines-readthroughconnectionsof).
 
-`createProofRequestCountsMachine({ ethereum, solana }, { proofQueueAddress }, { target, fromBlock })` counts a submitting address's requests and how many of them have a proof available, and reads again each time the queue enqueues a request or the bridge's state account changes. Every state holds `data.target`; `current` holds `data.counts`, `{ total, proofAvailable, unprocessed }`.
+- It counts a submitting address's requests and how many of them have a proof available. Every state holds `data.target`; `current` holds `data.counts`, `{ total, proofAvailable, unprocessed }`.
+- It counts again each time the queue enqueues a request or the bridge's state account changes.
 
 ## Transaction machines
 
@@ -572,7 +601,7 @@ import { filter, map, switchMap, take } from 'rxjs';
 import { createSolanaWalletTransactionMachine, mintCall$ } from '@nori-zk/nori-bridge-solana-sdk';
 
 // witnessState$ and proofAvailable: the request's witness machine and snapshot, as above;
-// recipient: the wallet's signer, from solana.wallet.ready$().
+// recipient: the wallet's signer, from solana.wallet.ready$(machine).
 const minting$ = witnessState$.pipe(
     filter((state): state is Extract<ProofRequestWitnessState, { node: 'current' }> => state.node === 'current'),
     take(1),
@@ -583,15 +612,17 @@ const minting$ = witnessState$.pipe(
 
 ### Minted so far (`createMintedSoFarMachine`)
 
-![Minted so far graph](src/tokenBridge/MintedSoFarGraph.svg)
+[`MintedSoFarGraph`](src/tokenBridge/MintedSoFarGraph.svg) `createMintedSoFarMachine(connections, recipient, programAddress?)` follows the same semantics as every [read machine](#read-machines-readthroughconnectionsof).
 
-`createMintedSoFarMachine(connections, recipient, programAddress?)` reads what a recipient has minted so far, from its minted-so-far account, and reads again each time that account changes. Every state holds `data.recipient`; `current` holds `data.minted`, `0` before the first mint.
+- It reads what a recipient has minted so far, from its minted-so-far account. Every state holds `data.recipient`; `current` holds `data.minted`, `0` before the first mint.
+- It reads again each time that account changes.
 
 ### Token balance (`createTokenBalanceMachine`)
 
-![Token balance graph](src/tokenBridge/TokenBalanceGraph.svg)
+[`TokenBalanceGraph`](src/tokenBridge/TokenBalanceGraph.svg) `createTokenBalanceMachine(connections, owner, mint?)` follows the same semantics as every [read machine](#read-machines-readthroughconnectionsof).
 
-`createTokenBalanceMachine(connections, owner, mint?)` reads an owner's balance of the bridged token (or `mint`) from its associated token account, and reads again each time that account changes. Every state holds `data.owner`; `current` holds `data.balance`, `0` while the owner has no token account.
+- It reads an owner's balance of the bridged token (or `mint`) from its associated token account. Every state holds `data.owner`; `current` holds `data.balance`, `0` while the owner has no token account.
+- It reads again each time that account changes.
 
 ## Custom read machines (`startReadThroughConnectionsMachine`)
 
@@ -637,7 +668,6 @@ Everything below comes from `@nori-zk/nori-bridge-solana-sdk`. Every machine als
 | Export | What it is |
 | --- | --- |
 | `createConnections(options)` | The app's connections: `network`, `ethereum`, `solana`, `nori`, `close()` ([Connections](#connections-createconnections)) |
-| `createConnectionStatusMachine`, `httpStatus`, `websocketStatus`, `walletStatus`, `networkStatus` | A status machine over any transports, and each transport's states as statuses ([Connection status](#connection-status-createconnectionstatusmachine)) |
 | `createChainChangesMachine(ethereum, filter?)`, `createSolanaChangesMachine(solana, watch?)`, `changesOf$` | Whether a chain has changed, and the trigger a reading machine gates on ([Chain change machines](#chain-change-machines-createchainchangesmachine-createsolanachangesmachine)) |
 | `PUBLIC_SOLANA_CLUSTERS`, `DEFAULT_NORI_WEBSOCKET_URL`, `DEFAULT_CONNECTIVITY_PROBE_URLS` | The public clusters' URLs and genesis hashes, Nori's websocket, the network check's endpoints |
 | `ConnectionNotReadyError`, `NoWalletConfiguredError`, `NoSolanaWalletConfiguredError` | A transport not ready, and a wallet the app gave none of |
@@ -724,7 +754,7 @@ Besides each machine's state type, these are exported as types:
 
 | Area | Types |
 | --- | --- |
-| Connections | `ConnectionsOptions`, `NetworkOptions`, `EthereumOrder`, `Connections`, `Ethereum`, `Solana`, `Nori`, `ProofRequestConnections`, `ConnectionName`, `ChainTransportName`, `ReadNeed`, `TransportName`, `TransportState`, `LiveConnectionStatus`, `StatusTransport`, `EthereumSubscriptionSocket`, `EthereumProvider`, `Eip1193EventProvider`, `SolanaRpc`, `SolanaCluster`, `EthereumHealth`, `SolanaHealth`, `WalletInfo`, `WalletAccount`, `SolanaWalletInfo` |
+| Connections | `ConnectionsOptions`, `NetworkOptions`, `EthereumOrder`, `Connections`, `Ethereum`, `Solana`, `Nori`, `ProofRequestConnections`, `ConnectionName`, `ChainTransportName`, `ReadNeed`, `TransportName`, `TransportState`, `ConnectionLoad`, `EthereumSubscriptionSocket`, `EthereumProvider`, `Eip1193EventProvider`, `SolanaRpc`, `SolanaCluster`, `EthereumHealth`, `SolanaHealth`, `WalletInfo`, `WalletAccount`, `SolanaWalletInfo` |
 | An app's own machines | `ChainRead`, `SolanaRead`, `ConnectedReadClients`, `ReadThroughConnectionsOptions`, `ReadThroughConnectionsMachineOptions`, `ReadThroughConnectionsRead`, `ReadRetryBackoff`, `ChainChanges`, `SolanaWatch`, `EthereumLogsFilter` |
 | Sending | `TransactionCall`, `TransactionToSend`, `SentTransaction`, `TransactionMachineOptions`, `InstructionToSend`, `SentSolanaTransaction`, `SolanaTransactionMachineOptions`, `ProgramErrorNames` |
 | Chain values | `EthereumTransactionReceipt`, `SolanaSignatureStatus`, `SolanaAccount`, `SolanaTransactionLogs`, `SolanaBridgeState` (the program's state account) |
@@ -751,7 +781,9 @@ surfpool start --offline --no-deploy --ci   # in another terminal, for the integ
 npm run test:integration
 ```
 
-`test:integration` runs the Solana changes, signature status, account and transaction logs machines, the Solana signer and wallet transaction machines (the wallet a Wallet Standard wallet over a key pair), and a mint, against a running local validator: `SOLANA_RPC_URL` (default `http://127.0.0.1:8899`) and `SOLANA_WS_URL` (default `ws://127.0.0.1:8900`). The mint plants the Nori program from `../target/deploy/token.so` and initializes the bridge when they are not there yet, plants a committed batch with surfpool's `surfnet_setAccount` cheatcode, sends `mint` with `mintCall$`, and follows the minted-so-far and token balance machines. It airdrops to fresh addresses and plants each batch at a fresh index, so it needs no reset between runs.
+`test:unit` includes the rate limits against a local HTTP JSON-RPC endpoint that turns requests away as a public RPC does (429s, `Retry-After`, a limit in a 200, an endpoint that refuses everything), with the real `@solana/kit` and ethers clients in front of it, and the websockets against a local socket server.
+
+`test:integration` runs the Solana changes, signature status, account and transaction logs machines, the Solana signer and wallet transaction machines (the wallet a Wallet Standard wallet over a key pair), the Solana websocket's check and heartbeat, and a mint, against a running local validator: `SOLANA_RPC_URL` (default `http://127.0.0.1:8899`) and `SOLANA_WS_URL` (default `ws://127.0.0.1:8900`). The mint plants the Nori program from `../target/deploy/token.so` and initializes the bridge when they are not there yet, plants a committed batch with surfpool's `surfnet_setAccount` cheatcode, sends `mint` with `mintCall$`, and follows the minted-so-far and token balance machines. It airdrops to fresh addresses and plants each batch at a fresh index, so it needs no reset between runs.
 
 The state machine graphs' images are generated from their definitions with [ystate-visualizer](https://github.com/yaw-rx/ystate), next to each definition. It reads a graph written as `define({ nodes, edges })` or as `define(readThroughConnectionsOf({ … }))`, and `--strict` fails on any graph it cannot draw exactly. From `src/`, for every graph:
 

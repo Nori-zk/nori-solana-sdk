@@ -24,7 +24,7 @@ import { createSolanaChangesMachine } from '../../rpc/solana/solanaChanges.impl.
 import { createSolanaAccountMachine } from '../../solana/account.impl.js';
 import { createTransactionLogsMachine } from '../../solana/transactionLogs.impl.js';
 import { createSignatureStatusMachine } from '../../transaction/signatureStatus.impl.js';
-import { nodesUntil, waitForNode, waitForState } from '../testUtils.js';
+import { nodesUntil, statesDuring, waitForNode, waitForState } from '../testUtils.js';
 
 const SYSTEM_PROGRAM_ADDRESS = address('11111111111111111111111111111111');
 
@@ -303,4 +303,18 @@ describe('the Solana value machines, on a local validator', () => {
         logs.close();
         connections.close();
     });
+});
+
+describe('the Solana websocket on the local validator', () => {
+    test('checks itself with a subscription the node acknowledges, and a quiet socket stays ready across heartbeats: the node answers the ping', async () => {
+        const connections = await connectTo(WS_URL);
+        const websocket = connections.solana.websocket.connection;
+        await waitForNode(websocket, 'ready', WAIT_MS);
+
+        // With checks every 500 ms, a socket is pinged after 500 ms of quiet and dropped after 1000 ms without a reply.
+        const quiet = await statesDuring(websocket, 4_000);
+
+        expect(new Set(quiet.map(({ node }) => node))).toEqual(new Set(['ready']));
+        connections.close();
+    }, WAIT_MS);
 });

@@ -2,13 +2,22 @@ import {
     createDefaultRpcTransport,
     createSolanaRpcFromTransport,
     isSolanaError,
+    type RpcResponse,
     type RpcTransport,
+    SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR,
 } from '@solana/kit';
-import { filter, map, type Observable, of, Subject, switchMap } from 'rxjs';
+import { defer, filter, finalize, from, map, type Observable, of, Subject, switchMap } from 'rxjs';
 import { atNode } from '../../utils/machines.js';
+import {
+    type GrantedSend,
+    type RequestResult,
+    retryAfterMsOf,
+    TOO_MANY_REQUESTS,
+} from '../connection/connectionGrants.js';
 import { type HealthCheckTimings, resolveHealthCheckTimings } from '../connection/healthCheckTimings.js';
 import { type HttpConnectionState } from '../connection/httpConnection.js';
-import { httpConnection, type HttpHealthCheck } from '../connection/httpConnection.impl.js';
+import { type HealthCheck } from '../connection/connection.impl.js';
+import { httpConnection } from '../connection/httpConnection.impl.js';
 import { type NetworkMachine } from '../connection/network.impl.js';
 import { SolanaRpcTransportError } from './errors.js';
 import { solanaRpcRead$ } from './solanaRpcRead.js';
@@ -94,16 +103,86 @@ function createTransportNamingUnansweredRequests(rpcUrl: string, timeoutMs: numb
 }
 
 /**
- * The Solana RPC for `rpcUrl`, its requests failing with
- * `SolanaRpcTransportError` when they get no response.
+ * The Solana RPC for `rpcUrl`, every request of which goes through the
+ * grants (`send$`), failing with `SolanaRpcTransportError` when it gets no
+ * response. Kit takes a transport that returns a promise, so the grants'
+ * answer becomes one here; a request aborted while it waits for its turn is
+ * never sent.
  *
  * @param rpcUrl HTTP(S) URL of the Solana RPC node.
- * @param timeoutMs How long a request may take before it counts as unanswered.
+ * @param timeoutMs How long a request may take, once sent, before it counts as unanswered.
+ * @param send$ Sends a request on its subscriber's turn.
  * @returns The RPC.
  */
-function createSolanaRpc(rpcUrl: string, timeoutMs: number) {
-    return createSolanaRpcFromTransport(createTransportNamingUnansweredRequests(rpcUrl, timeoutMs));
+function createSolanaRpc(rpcUrl: string, timeoutMs: number, send$: GrantedSend) {
+    const transport = createTransportNamingUnansweredRequests(rpcUrl, timeoutMs);
+    const granted: RpcTransport = <TResponse>(config: Parameters<RpcTransport>[0]) =>
+        new Promise<RpcResponse<TResponse>>((resolve, reject) => {
+            // A request may be shared with others asking the same, so it runs on its own signal,
+            // aborted only once no one waits for it; each caller's signal drops that caller only.
+            const sending = send$(
+                () =>
+                    defer(() => {
+                        const shared = new AbortController();
+                        return from(transport<TResponse>({ ...config, signal: shared.signal })).pipe(
+                            finalize(() => shared.abort())
+                        );
+                    }),
+                coalescingKeyOf(config.payload)
+            ).subscribe({
+                next: resolve,
+                error: reject,
+            });
+            config.signal?.addEventListener(
+                'abort',
+                () => {
+                    sending.unsubscribe();
+                    reject(config.signal?.reason);
+                },
+                { once: true }
+            );
+        });
+    return createSolanaRpcFromTransport(granted);
 }
+
+/**
+ * What a JSON-RPC request asks, as a key: its method and params, so two
+ * requests asking the same share one answer. A bigint is written as text.
+ *
+ * @param payload The request kit sends.
+ * @returns The key, or `undefined` for a payload that is not one request.
+ */
+function coalescingKeyOf(payload: unknown): string | undefined {
+    if (typeof payload !== 'object' || payload === null || !('method' in payload)) return undefined;
+    const { method, params } = payload as { method: unknown; params?: unknown };
+    return JSON.stringify([method, params], (_key, value: unknown) =>
+        typeof value === 'bigint' ? `${value.toString()}n` : value
+    );
+}
+
+/**
+ * Whether a Solana RPC node turned a request away for too many requests:
+ * kit raises an HTTP error response as a `SolanaError` carrying its status.
+ *
+ * @param outcome How the request came back.
+ * @returns `true` for HTTP 429.
+ */
+const turnedAway = (outcome: RequestResult<unknown>): boolean =>
+    'failed' in outcome &&
+    isSolanaError(outcome.failed, SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR) &&
+    outcome.failed.context.statusCode === TOO_MANY_REQUESTS;
+
+/**
+ * How long a Solana RPC node that turned a request away asked to be left
+ * alone: its `Retry-After`, which kit's HTTP error carries in its headers.
+ *
+ * @param outcome How the request came back.
+ * @returns The wait in ms, or `undefined` when it gave none.
+ */
+const retryAfterMs = (outcome: RequestResult<unknown>): number | undefined =>
+    'failed' in outcome && isSolanaError(outcome.failed, SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR)
+        ? retryAfterMsOf(outcome.failed.context.headers.get('retry-after'))
+        : undefined;
 
 /** The Solana RPC reads go through. */
 export type SolanaRpc = ReturnType<typeof createSolanaRpc>;
@@ -121,7 +200,7 @@ const clusterHealthCheck$ = (
     rpc: SolanaRpc,
     expectedGenesisHash: string,
     url: string
-): Observable<Exclude<HttpHealthCheck<SolanaHealth>, { outcome: 'failed' }>> =>
+): Observable<Exclude<HealthCheck<SolanaHealth>, { outcome: 'failed' }>> =>
     solanaRpcRead$((abortSignal) => rpc.getGenesisHash().send({ abortSignal }), 'Failed to read the genesis hash.').pipe(
         switchMap((genesisHash) =>
             genesisHash !== expectedGenesisHash
@@ -152,7 +231,8 @@ const clusterHealthCheck$ = (
  * @param network The running network machine the connection follows.
  * @returns
  *   - `connection`: the running HTTP connection machine; `ready` names the URL that passed its check.
- *   - `rpcOf(url)`: the RPC of one of its URLs.
+ *   - `rpcOf(url, subscriber)`: the RPC of one of its URLs, every request of which takes the subscriber's turn.
+ *   - `load$`: each second's count of the requests to its endpoints, and the rate after it.
  *   - `reportReadFailed()`: tells the machine a request failed to reach the node.
  *   - `close()`: moves the machine to `closed`.
  */
@@ -169,17 +249,16 @@ export function solanaHttp(options: SolanaHttpOptions, network: NetworkMachine) 
     const { requestTimeoutMs } = resolveHealthCheckTimings(options);
     const readFailed$ = new Subject<void>();
     const close$ = new Subject<void>();
-    const rpcs = new Map(rpcUrls.map((rpcUrl) => [rpcUrl, createSolanaRpc(rpcUrl, requestTimeoutMs)]));
-    const rpcOf = (url: string): SolanaRpc | undefined => rpcs.get(url);
 
-    const connection = httpConnection<SolanaHealth>({
+    const connection = httpConnection<SolanaHealth, SolanaRpc>({
         ...options,
         urls: rpcUrls,
-        checkHealth: (url) => {
-            const rpc = rpcOf(url);
-            if (rpc === undefined) throw new Error(`No Solana RPC for ${url}.`);
-            return clusterHealthCheck$(rpc, expectedGenesisHash, url);
+        transport: {
+            clientOn: (url, send$) => createSolanaRpc(url, requestTimeoutMs, send$),
+            turnedAway,
+            retryAfterMs,
         },
+        checkHealth: (rpc, url) => clusterHealthCheck$(rpc, expectedGenesisHash, url),
         networkWentOffline$: network.state$.pipe(filter(atNode('offline'))),
         networkCameOnline$: network.state$.pipe(filter(atNode('online'))),
         readFailed$,
@@ -188,7 +267,8 @@ export function solanaHttp(options: SolanaHttpOptions, network: NetworkMachine) 
 
     return {
         connection,
-        rpcOf,
+        rpcOf: connection.clientOf,
+        load$: connection.load$,
         reportReadFailed: () => readFailed$.next(),
         close: () => close$.next(),
     };

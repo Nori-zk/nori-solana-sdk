@@ -21,10 +21,12 @@ function startSolanaEndpoints(
     const network$ = new BehaviorSubject<'online' | 'offline'>('online');
     const readFailed$ = new Subject<void>();
     const close$ = new Subject<void>();
-    const machine = httpConnection<SolanaHealth>({
+    const machine = httpConnection<SolanaHealth, string>({
         ...FAST_TIMINGS,
         urls: rpcUrls,
-        checkHealth: (url) =>
+        // Each endpoint's client is its URL; none turns a request away.
+        transport: { clientOn: (url) => url, turnedAway: () => false },
+        checkHealth: (_client, url) =>
             defer(() => {
                 checked.push(url);
                 const answer = answers.get(url);
@@ -109,7 +111,7 @@ describe('HTTP connection machine, over Solana RPC endpoints', () => {
         await waitForNode(machine, 'ready');
         answers.set('https://only.test', 'down');
         readFailed$.next();
-        await waitForNode(machine, 'unreachable');
+        await waitForNode(machine, 'waitingToRetry');
         network$.next('offline');
         await waitForNode(machine, 'offline');
         answers.set('https://only.test', 'answers');

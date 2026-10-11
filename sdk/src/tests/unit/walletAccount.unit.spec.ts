@@ -1,5 +1,5 @@
 import { BrowserProvider, Network } from 'ethers';
-import { BehaviorSubject, of } from 'rxjs';
+import { BehaviorSubject, NEVER, of } from 'rxjs';
 import { type EthereumTransports } from '../../rpc/connection/connections.js';
 import { createWalletAccountMachine } from '../../rpc/eth/walletAccount.impl.js';
 import {
@@ -9,6 +9,7 @@ import {
     EXPECTED_CHAIN_ID,
     FAST_TIMINGS,
     nodesUntil,
+    statesDuring,
     TARGET_A,
     TARGET_B,
     waitForNode,
@@ -50,7 +51,9 @@ function createAccountWallet() {
         connection: { state$ },
         current: () => provider,
         currentWalletProvider: () => walletProvider,
-        walletProvider$: of(walletProvider),
+        walletProvider$: () => of(walletProvider),
+        walletEvents$: of(walletProvider),
+        load$: NEVER,
         chooseWallet: (): void => undefined,
         switchToExpectedChain: (): void => undefined,
         reportReadFailed: (): void => undefined,
@@ -118,6 +121,23 @@ describe('wallet account machine', () => {
         close();
     });
 
+    test('the wallet overwhelmed, and its limit changing, still serves: asking stays asking', async () => {
+        const { account, answers, state$, close } = await setUp();
+        answers.answer = 'never';
+        await waitForNode(account, 'current');
+
+        const asking = nodesUntil(account, 'askingToShareAccount');
+        account.shareAccount();
+        await asking;
+        const during = statesDuring(account, 200);
+        state$.next({ node: 'overwhelmed', data: { ratePerSecond: 5 } });
+        state$.next({ node: 'overwhelmed', data: { ratePerSecond: 2 } });
+
+        expect(new Set((await during).map(({ node }) => node))).toEqual(new Set(['askingToShareAccount']));
+        account.close();
+        close();
+    });
+
     test('waits for the wallet, and the wallet leaving while asking waits for it again', async () => {
         const { account, answers, state$, close } = await setUp();
         answers.answer = 'never';
@@ -126,7 +146,7 @@ describe('wallet account machine', () => {
         const asking = nodesUntil(account, 'askingToShareAccount');
         account.shareAccount();
         await asking;
-        state$.next({ node: 'unreachable', data: {} });
+        state$.next({ node: 'waitingToRetry', data: {} });
         const waiting = await waitForNode(account, 'waitingForConnectionWhileRefreshing');
         expect(waiting.data.waitingOn).toEqual(['ethereum.wallet']);
 

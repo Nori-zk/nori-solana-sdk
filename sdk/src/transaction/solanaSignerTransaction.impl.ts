@@ -1,6 +1,6 @@
 import { type ResolveNodeData } from '@yaw-rx/ystate';
 import { type Instruction, type TransactionSigner } from '@solana/kit';
-import { map, type Observable, Subject } from 'rxjs';
+import { map, type Observable, Subject, switchMap, take } from 'rxjs';
 import { type ProofRequestConnections } from '../proofRequest/connectedRead.js';
 import { solanaCallsUsable$ } from '../rpc/connection/connections.js';
 import { startReadThroughConnectionsMachine } from '../rpc/connection/readThroughConnections.impl.js';
@@ -51,13 +51,18 @@ export function createSolanaSignerTransactionMachine(
         backoff: options.backoff,
         // The instructions it is made for are its initial state.
         start: { node: 'ready', data: { instructions: instructionsToSendOf(instructions) } },
-        ownTransitions: (read$, state$) => {
-            // One send per entry into `sending`.
+        ownTransitions: (read$, state$, started$) => {
+            // One send per entry into `sending`, on this machine's turns.
             const taking = requestOutcomes(
                 state$,
                 'sending',
                 ({ instructions }: ResolveNodeData<typeof SolanaSignerTransactionGraph.nodes, 'sending'>): Observable<SendOutcome> =>
-                    sendSolanaTransaction$(connections.solana, signer, instructions, errorNames).pipe(
+                    started$.pipe(
+                        take(1),
+                        switchMap((machine) =>
+                            sendSolanaTransaction$(connections.solana, machine, signer, instructions, errorNames)
+                        )
+                    ).pipe(
                         map((result): SendOutcome => {
                             if (result.outcome === 'sent') return { transition: 'sent', data: result.sent };
                             if (result.outcome === 'refused') {

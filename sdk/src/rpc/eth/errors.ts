@@ -52,7 +52,7 @@ export class ProofRequestBatchFetchError extends Error {
     }
 }
 
-/** The error of `ethereum.wallet.ready$()` when the app gave no `ethereum.wallet`. */
+/** The error of `ethereum.wallet.ready$(machine)` when the app gave no `ethereum.wallet`. */
 export class NoWalletConfiguredError extends Error {
     constructor() {
         super('No wallet is configured: give ethereum.wallet to createConnections to use one.');

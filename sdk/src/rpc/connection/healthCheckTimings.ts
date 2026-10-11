@@ -9,6 +9,12 @@ export interface HealthCheckTimings {
      * the failure, so the connection checks itself at once.
      */
     requestTimeoutMs?: number;
+    /**
+     * How many seconds in a row with nothing waiting and nothing turned away
+     * lift an endpoint's rate limit, once it has turned requests away for too
+     * many (default: 30).
+     */
+    quietSecondsToLift?: number;
     /** Exponential backoff between health checks while unreachable. */
     retryBackoff?: {
         /** Wait before the first retry, in ms (default: 1000). */

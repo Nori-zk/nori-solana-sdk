@@ -1,120 +1,88 @@
 import { define, type StateUnion } from '@yaw-rx/ystate';
+import { connectionOf, wrongNetworkOf } from './connection.js';
+import { pacedOf } from './pacedConnection.js';
+
+const { nodes, edges } = connectionOf({});
+const wrongNetwork = wrongNetworkOf({});
+const paced = pacedOf(nodes.ready);
+
+/** The node a websocket has besides `connectionOf`'s: it stopped trying. */
+const socketNodes = { gaveUp: { error: '' } };
+
+/** The edges a websocket has besides `connectionOf`'s: its socket dropping, and giving up. */
+const socketEdges = {
+    droppedWhileConnecting: { from: 'connecting', to: 'waitingToRetry', on: 'dropped.next' },
+    droppedWhileReady: { from: 'ready', to: 'waitingToRetry', on: 'dropped.next' },
+    attemptsRanOut: { from: 'connecting', to: 'gaveUp', on: 'attemptsRanOut.next' },
+    retryRequested: { from: 'gaveUp', to: 'connecting', on: 'retry.next' },
+    wentOfflineAfterGivingUp: { from: 'gaveUp', to: 'offline', on: 'networkWentOffline.next' },
+    closedAfterGivingUp: { from: 'gaveUp', to: 'closed', on: 'close.next' },
+} as const;
 
 /**
- * Whether a WebSocket to one URL is open. The same definition serves every
- * server; what is sent on every open and how the heartbeat works is the
- * implementation's. No node is a dead end.
+ * Whether requests and subscriptions can run over a websocket to one URL
+ * (`connectionOf`). Its socket tells it when it drops (closing, erroring or
+ * missing its heartbeat), so nothing asks again on a timer; it is checked
+ * once per socket. The socket is held in `connecting` and the nodes that
+ * serve, and closed in every other node. No node is a dead end.
  *
- * - `connecting` opens the socket. Opening it is `open`; a socket that fails
- *   or does not open in time is `reconnecting`, or `gaveUp` when that was
- *   the last attempt allowed.
- * - `open`: the socket is open and what the owner sends on every open has
- *   been sent. A socket that closes, errors or misses its heartbeat is
- *   `reconnecting`.
- * - `reconnecting` opens it again after a wait that doubles with each
- *   failed attempt in a row (`failedAttempts`), carrying the last `error`.
+ * - `connecting` opens a socket, unless it holds one, then checks it. A
+ *   socket that fails, does not open in time or fails its check is
+ *   `waitingToRetry`, or `gaveUp` when that was the last attempt allowed.
+ * - A held socket that drops goes to `waitingToRetry`.
  * - `gaveUp`: the attempts allowed ran out. It holds the last `error` and
  *   connects again on `retry`, or when the network comes back online.
- * - Going offline pauses everything in `offline`; coming back online
- *   connects at once.
- * - `closed` ends the machine from any node and completes its streams.
+ *
+ * Nori's websocket is this graph: its server pushes topics, serves no
+ * network to check, and turns nothing away for too many requests.
  */
 export const WebSocketConnectionGraph = define({
-    nodes: {
-        connecting: { failedAttempts: 0 },
-        open: { openedAt: 0 },
-        reconnecting: { failedAttempts: 0, error: '' },
-        gaveUp: { error: '' },
-        offline: {},
-        closed: {},
-    },
+    nodes: { ...nodes, ...socketNodes },
+    edges: { ...edges, ...socketEdges },
+});
+
+/**
+ * A websocket to an RPC node that cannot be asked which network it serves:
+ * `WebSocketConnectionGraph`, and the rate the node takes requests at
+ * (`pacedOf`). Every request and subscription sent over it takes a turn
+ * from its grants; the socket is held in `overwhelmed` too, and dropping
+ * there goes to `waitingToRetry`. A Solana node's websocket serves
+ * subscriptions only, so this is its graph.
+ */
+export const RateLimitedWebSocketGraph = define({
+    nodes: { ...nodes, ...paced.nodes, ...socketNodes },
     edges: {
-        socketOpened: {
-            from: 'connecting',
-            to: 'open',
-            on: 'opened.next',
-        },
-        connectFailed: {
-            from: 'connecting',
-            to: 'reconnecting',
-            on: 'connectFailed.next',
-        },
-        attemptsRanOut: {
-            from: 'connecting',
-            to: 'gaveUp',
-            on: 'attemptsRanOut.next',
-        },
-        socketDropped: {
-            from: 'open',
-            to: 'reconnecting',
-            on: 'dropped.next',
-        },
-        reconnectStarted: {
-            from: 'reconnecting',
-            to: 'connecting',
-            on: 'reconnectDue.next',
-        },
-        retryRequested: {
-            from: 'gaveUp',
-            to: 'connecting',
-            on: 'retry.next',
-        },
-
-        wentOfflineWhileConnecting: {
-            from: 'connecting',
-            to: 'offline',
-            on: 'networkWentOffline.next',
-        },
-        wentOfflineWhileOpen: {
-            from: 'open',
-            to: 'offline',
-            on: 'networkWentOffline.next',
-        },
-        wentOfflineWhileReconnecting: {
-            from: 'reconnecting',
-            to: 'offline',
-            on: 'networkWentOffline.next',
-        },
-        wentOfflineAfterGivingUp: {
-            from: 'gaveUp',
-            to: 'offline',
-            on: 'networkWentOffline.next',
-        },
-        cameOnline: {
-            from: 'offline',
-            to: 'connecting',
-            on: 'networkCameOnline.next',
-        },
-
-        closedWhileConnecting: {
-            from: 'connecting',
-            to: 'closed',
-            on: 'close.next',
-        },
-        closedWhileOpen: {
-            from: 'open',
-            to: 'closed',
-            on: 'close.next',
-        },
-        closedWhileReconnecting: {
-            from: 'reconnecting',
-            to: 'closed',
-            on: 'close.next',
-        },
-        closedAfterGivingUp: {
-            from: 'gaveUp',
-            to: 'closed',
-            on: 'close.next',
-        },
-        closedWhileOffline: {
-            from: 'offline',
-            to: 'closed',
-            on: 'close.next',
-        },
+        ...edges,
+        ...paced.edges,
+        ...socketEdges,
+        droppedWhileOverwhelmed: { from: 'overwhelmed', to: 'waitingToRetry', on: 'dropped.next' },
     },
 });
 
-/** A WebSocket connection's state: a node of the graph and its data. */
-export type WebSocketConnectionState = StateUnion<
-    typeof WebSocketConnectionGraph.nodes
->;
+/**
+ * A websocket to an RPC node that is asked which network it serves:
+ * `RateLimitedWebSocketGraph`, and `wrongNetwork` (`wrongNetworkOf`),
+ * which connects again on a fresh socket after a wait that doubles with
+ * each failed check (`wrongNetworkRechecked`). An Ethereum node's websocket
+ * answers `eth_chainId`, so this is its graph.
+ */
+export const RateLimitedWebSocketWithWrongNetworkGraph = define({
+    nodes: { ...nodes, ...wrongNetwork.nodes, ...paced.nodes, ...socketNodes },
+    edges: {
+        ...edges,
+        ...wrongNetwork.edges,
+        ...paced.edges,
+        ...socketEdges,
+        droppedWhileOverwhelmed: { from: 'overwhelmed', to: 'waitingToRetry', on: 'dropped.next' },
+        wrongNetworkRechecked: { from: 'wrongNetwork', to: 'connecting', on: 'recheckDue.next' },
+    },
+});
+
+/** A websocket connection's state: a node of the graph and its data. */
+export type WebSocketConnectionState = StateUnion<typeof WebSocketConnectionGraph.nodes>;
+
+/** A paced websocket connection's state: a node of the graph and its data. */
+export type RateLimitedWebSocketState = StateUnion<typeof RateLimitedWebSocketGraph.nodes>;
+
+/** A network-checked websocket connection's state: a node of the graph and its data. */
+export type RateLimitedWebSocketWithWrongNetworkState = StateUnion<typeof RateLimitedWebSocketWithWrongNetworkGraph.nodes>;

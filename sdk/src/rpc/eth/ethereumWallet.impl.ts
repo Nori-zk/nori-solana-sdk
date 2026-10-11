@@ -17,7 +17,7 @@ import {
     take,
     timer,
 } from 'rxjs';
-import { type ResolveNodeData } from '@yaw-rx/ystate';
+import { type ResolveNodeData, type RunningMachine } from '@yaw-rx/ystate';
 import { BrowserProvider, toQuantity } from 'ethers';
 import { messageOf } from '../../utils/messageOf.js';
 import {
@@ -29,19 +29,24 @@ import {
     type StartedMachine,
     withOutcome,
 } from '../../utils/machines.js';
+import { grantedClients, type GrantedSend } from '../connection/connectionGrants.js';
 import {
     type HealthCheckTimings,
     resolveHealthCheckTimings,
 } from '../connection/healthCheckTimings.js';
+import { backgroundCheckedTransitions } from '../connection/backgroundChecked.impl.js';
 import {
-    healthCheckedTransitions,
-    type HttpHealthCheck,
+    connectionTransitions,
+    type HealthCheck,
     settledHealthCheck$,
-} from '../connection/httpConnection.impl.js';
+} from '../connection/connection.impl.js';
+import { LIMIT_EXCEEDED, turnedAwayWith } from '../connection/jsonRpcTopic.js';
 import { type NetworkMachine } from '../connection/network.impl.js';
+import { pacedTransitions } from '../connection/pacedConnection.impl.js';
 import {
     type Eip1193EventProvider,
     eip1193Event$,
+    type Eip1193Events,
     requestErrorCode,
     USER_REJECTED_REQUEST,
 } from './eip1193.js';
@@ -86,7 +91,7 @@ export interface EthereumWalletOptions extends HealthCheckTimings {
 }
 
 /** What one health check of the wallet found: its chain, then its latest block. */
-type WalletHealthCheck = HttpHealthCheck<EthereumHealth>;
+type WalletHealthCheck = HealthCheck<EthereumHealth>;
 
 /**
  * How a switch request ended, when it did not switch the chain: the edge
@@ -159,21 +164,48 @@ function walletAnnouncement$(
 }
 
 /**
+ * A wallet's EIP-1193 provider whose every request goes through the grants
+ * (`send$`); its events are the wallet's own. EIP-1193 requests return a
+ * promise, so the grants' answer becomes one here.
+ *
+ * @param provider The wallet's provider.
+ * @param send$ Sends a request on its subscriber's turn.
+ * @returns The provider, its requests on the subscriber's turns.
+ */
+function grantedWalletProvider(provider: Eip1193EventProvider, send$: GrantedSend): Eip1193EventProvider {
+    return {
+        request: (request) =>
+            new Promise((resolve, reject) => {
+                send$(() => defer(() => provider.request(request))).subscribe({ next: resolve, error: reject });
+            }),
+        on: (event, listener) => provider.on?.(event, listener),
+        removeListener: (event, listener) => provider.removeListener?.(event, listener),
+    };
+}
+
+/** Whether the wallet turned a request away for too many requests: it rejects with EIP-1474's "Limit exceeded". */
+const turnedAway = turnedAwayWith(LIMIT_EXCEEDED);
+
+/**
  * Opens the user's wallet for reads and runs its machine: finds the user's
  * wallets, settles which one reads go through, follows which chain it is
- * on, and checks that reads through it work. An ethers provider over the
- * wallet is made afresh each time the machine becomes `ready` (ethers
- * caches the network it detected and fails every call after a change).
+ * on, and checks that reads through it work. Every request through the
+ * wallet takes a turn from its grants (`grantedClients`). Ethers providers
+ * over the wallet are made afresh each time the machine comes to serve
+ * requests (ethers caches the network it detected and fails every call
+ * after a change).
  *
  * @param options The expected chain, how long to search for wallets, and timings.
  * @param network The running network machine the connection follows.
  * @returns
  *   - `connection`: the running wallet machine.
- *   - `current()`: the ethers provider over the wallet, made afresh on each entry into `ready`.
- *   - `currentWalletProvider()`: the chosen wallet's EIP-1193 provider, if one is chosen.
+ *   - `current(subscriber)`: the subscriber's ethers provider over the wallet, made afresh on each entry into `ready` or `overwhelmed`.
+ *   - `currentWalletProvider(subscriber)`: the chosen wallet's EIP-1193 provider, its requests on the subscriber's turns, if one is chosen.
  *   - `chooseWallet(uuid)`: picks one of several wallets, while choosing.
  *   - `switchToExpectedChain()`: asks the wallet to switch, once, while on another chain.
- *   - `walletProvider$`: the chosen wallet's provider, once there is one.
+ *   - `walletProvider$(subscriber)`: the chosen wallet's provider, its requests on the subscriber's turns, once there is one.
+ *   - `walletEvents$`: the chosen wallet's events alone, once there is one.
+ *   - `load$`: each second's count of the requests through the wallet, and the rate after it.
  *   - `reportReadFailed()`: tells the machine a read failed to reach the wallet.
  *   - `close()`: moves the machine to `closed`.
  */
@@ -214,21 +246,45 @@ export function ethereumWallet(
     // Ask every installed wallet to announce itself (EIP-6963).
     walletEvents?.dispatchEvent(new Event('eip6963:requestProvider'));
 
-    // The chosen wallet's provider, from the wallet the machine carries.
-    const walletProvider$ = state$.pipe(
+    // Every request through a wallet takes a turn from its grants: one granted provider per wallet (by uuid) and subscriber.
+    const granted = grantedClients<Eip1193EventProvider>({
+        clientOn: (uuid, send$) => {
+            const announcement = wallets.get(uuid);
+            if (announcement === undefined) throw new Error(`No wallet announced itself as ${uuid}.`);
+            return grantedWalletProvider(announcement.provider, send$);
+        },
+        turnedAway,
+    }, options.quietSecondsToLift);
+    // The running wallet machine, once started: the subscriber its own requests (health checks, switch requests) take their turns as.
+    const running$ = new ReplaySubject<RunningMachine>(1);
+
+    // The chosen wallet, by uuid, from the wallet the machine carries.
+    const chosenUuid$ = state$.pipe(
         map(({ data }) => ('wallet' in data ? data.wallet.uuid : undefined)),
-        filter((uuid): uuid is string => uuid !== undefined),
+        filter((uuid): uuid is string => uuid !== undefined && wallets.has(uuid)),
         distinctUntilChanged(),
-        map((uuid) => wallets.get(uuid)?.provider),
-        filter(
-            (provider): provider is Eip1193EventProvider =>
-                provider !== undefined
-        ),
         share({
             connector: () => new ReplaySubject(1),
             resetOnRefCountZero: false,
         })
     );
+    // The chosen wallet's provider: its events, and what its requests go to through the grants.
+    const walletProvider$ = chosenUuid$.pipe(
+        map((uuid) => wallets.get(uuid)?.provider),
+        filter(
+            (provider): provider is Eip1193EventProvider =>
+                provider !== undefined
+        )
+    );
+    /**
+     * The chosen wallet's provider for one subscriber: every request takes
+     * the subscriber's turn, its events are the wallet's own.
+     *
+     * @param subscriber The machine the requests are for.
+     * @returns The provider, once a wallet is chosen, and each wallet chosen after.
+     */
+    const grantedWalletProvider$ = (subscriber: RunningMachine): Observable<Eip1193EventProvider> =>
+        chosenUuid$.pipe(map((uuid) => granted.clientOf(uuid, subscriber)));
 
     // The search's three outcome edges share one look at what announced
     // itself in time; the legacy wallet counts only when none did.
@@ -246,37 +302,41 @@ export function ethereumWallet(
     );
 
     /**
-     * One health check of the wallet: its chain, then its latest block,
-     * timed out, with a failure as a result rather than an error.
+     * One health check of the wallet: its chain, then its latest block, with
+     * a failure as a result rather than an error. Its requests take the
+     * machine's turns, each timing out from when it is sent.
      *
-     * @param provider The wallet's provider.
+     * @param running The wallet machine, whose turns the check takes.
      * @param wallet The wallet, whose reverse-DNS id is the check's `url`.
      * @returns The check's result, once.
      */
-    const runHealthCheck$ = (provider: Eip1193EventProvider, wallet: WalletInfo): Observable<WalletHealthCheck> =>
-        settledHealthCheck$(
+    const runHealthCheck$ = (running: RunningMachine, wallet: WalletInfo): Observable<WalletHealthCheck> => {
+        const provider = granted.clientOf(wallet.uuid, running, timings.healthCheckTimeoutMs);
+        return settledHealthCheck$(
             chainHealthCheck$(
                 (method) => defer(() => provider.request({ method })).pipe(map((result) => BigInt(result as string))),
                 expectedChainId,
                 wallet.rdns
             ),
-            wallet.rdns,
-            timings.healthCheckTimeoutMs
+            wallet.rdns
         );
+    };
 
     // The check's three outcome edges share one check per entry into
-    // `checking`; a chain change restarts it through the `checking` self-loop.
-    const check$ = requestOnEntry$(state$, 'checking', ({ wallet }) =>
+    // `connecting`; a chain change restarts it through the `connecting` self-loop.
+    const check$ = requestOnEntry$(state$, 'connecting', ({ wallet }) =>
         walletProvider$.pipe(
             take(1),
-            switchMap((provider) => runHealthCheck$(provider, wallet))
+            switchMap(() => running$.pipe(take(1))),
+            switchMap((running) => runHealthCheck$(running, wallet))
         )
     );
     // Background checks while ready, one interval after each entry.
     const backgroundCheck$ = requestOnEntry$(state$, 'ready', ({ wallet }) =>
             timer(timings.healthCheckIntervalMs).pipe(
                 switchMap(() => walletProvider$.pipe(take(1))),
-                switchMap((provider) => runHealthCheck$(provider, wallet))
+                switchMap(() => running$.pipe(take(1))),
+                switchMap((running) => runHealthCheck$(running, wallet))
             )
     );
 
@@ -288,9 +348,10 @@ export function ethereumWallet(
         (asking: ResolveNodeData<typeof EthereumWalletGraph.nodes, 'askingToSwitchChain'>): Observable<SwitchOutcome> =>
         walletProvider$.pipe(
             take(1),
-            switchMap((provider) =>
+            switchMap(() => running$.pipe(take(1))),
+            switchMap((running) =>
                 defer(() =>
-                    provider.request({
+                    granted.clientOf(asking.wallet.uuid, running).request({
                         method: 'wallet_switchEthereumChain',
                         params: [{ chainId: toQuantity(expectedChainId) }],
                     })
@@ -309,9 +370,18 @@ export function ethereumWallet(
     );
 
     const machine = EthereumWalletGraph.implement({
-        ...healthCheckedTransitions<EthereumHealth, { wallet: WalletInfo }>({
-            check$,
+        ...pacedTransitions<ResolveNodeData<typeof EthereumWalletGraph.nodes, 'ready'>>({
+            granted,
+            state$,
+            // A wallet's requests are granted per wallet.
+            endpointOf: ({ wallet }) => wallet.uuid,
+        }),
+        ...backgroundCheckedTransitions<EthereumHealth, { wallet: WalletInfo }>({
             backgroundCheck$,
+            carry: ({ wallet }) => ({ wallet }),
+        }),
+        ...connectionTransitions<EthereumHealth, { wallet: WalletInfo }>({
+            check$,
             readFailed$,
             networkWentOffline$: network.state$.pipe(filter(atNode('offline'))),
             networkCameOnline$: network.state$.pipe(filter(atNode('online'))),
@@ -431,45 +501,79 @@ export function ethereumWallet(
 
     const connection = machine.close().start('lookingForWallets');
     started$.next(connection);
+    running$.next(connection);
 
-    // A fresh ethers provider over the wallet on each entry into `ready`
-    // from another node; the `stillReady` self-loop keeps it.
-    let client: BrowserProvider | undefined;
-    let walletProvider: Eip1193EventProvider | undefined;
+    // Fresh ethers providers over the wallet, one per subscriber, on each
+    // entry into a node that serves requests (`ready`, `overwhelmed`) from
+    // another node; `stillReady` and moving between the two keep them.
+    let serving:
+        | { uuid: string; made: BrowserProvider[]; bySubscriber: WeakMap<RunningMachine, BrowserProvider> }
+        | undefined;
+    let chosenUuid: string | undefined;
     subscriptions.add(
-        walletProvider$.subscribe((chosen) => {
-            walletProvider = chosen;
+        chosenUuid$.subscribe((uuid) => {
+            chosenUuid = uuid;
         })
     );
     subscriptions.add(
         connection.state$
             .pipe(
-                map((state) => state.node === 'ready'),
+                map((state) =>
+                    state.node === 'ready' || state.node === 'overwhelmed' ? state.data.wallet.uuid : undefined
+                ),
                 distinctUntilChanged(),
-                filter((isReady) => isReady)
+                filter((uuid): uuid is string => uuid !== undefined)
             )
-            .subscribe(() => {
-                if (!walletProvider) return;
-                client?.destroy();
-                client = new BrowserProvider(walletProvider);
+            .subscribe((uuid) => {
+                serving?.made.forEach((client) => client.destroy());
+                serving = { uuid, made: [], bySubscriber: new WeakMap() };
             })
     );
     subscriptions.add(
         connection.status$
             .pipe(filter((status) => status !== 'running'))
             .subscribe(() => {
-                client?.destroy();
+                serving?.made.forEach((client) => client.destroy());
+                granted.close();
                 subscriptions.unsubscribe();
             })
     );
 
+    /**
+     * The subscriber's ethers provider over the wallet, every request of
+     * which takes the subscriber's turn; made afresh on each entry into a
+     * node that serves requests.
+     *
+     * @param subscriber The machine the requests are for.
+     * @returns The provider, or `undefined` before the wallet first serves requests.
+     */
+    const current = (subscriber: RunningMachine): BrowserProvider | undefined => {
+        if (serving === undefined) return undefined;
+        const made = serving.bySubscriber.get(subscriber);
+        if (made !== undefined) return made;
+        const client = new BrowserProvider(granted.clientOf(serving.uuid, subscriber));
+        serving.made.push(client);
+        serving.bySubscriber.set(subscriber, client);
+        return client;
+    };
+
     return {
         connection,
-        current: (): BrowserProvider | undefined => client,
-        currentWalletProvider: (): Eip1193EventProvider | undefined => walletProvider,
+        current,
+        currentWalletProvider: (subscriber: RunningMachine): Eip1193EventProvider | undefined =>
+            chosenUuid === undefined ? undefined : granted.clientOf(chosenUuid, subscriber),
         chooseWallet: (uuid: string) => chooseWallet$.next(uuid),
         switchToExpectedChain: () => switchToExpectedChain$.next(),
-        walletProvider$,
+        walletProvider$: grantedWalletProvider$,
+        load$: chosenUuid$.pipe(switchMap((uuid) => granted.loadOf(uuid))),
+        walletEvents$: walletProvider$.pipe(
+            map(
+                (provider): Eip1193Events => ({
+                    on: (event, listener) => provider.on?.(event, listener),
+                    removeListener: (event, listener) => provider.removeListener?.(event, listener),
+                })
+            )
+        ),
         reportReadFailed: () => readFailed$.next(),
         close: () => close$.next(),
     };

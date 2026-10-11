@@ -134,7 +134,7 @@ describe('Ethereum wallet transaction machine', () => {
 
         transaction.send();
         await waitForNode(transaction, 'askingToSign');
-        state$.next({ node: 'unreachable', data: {} });
+        state$.next({ node: 'waitingToRetry', data: {} });
         const failed = await waitForNode(transaction, 'sendFailed');
         expect(failed.data).toEqual({
             transaction: expect.objectContaining(CALL),

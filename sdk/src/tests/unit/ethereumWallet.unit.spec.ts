@@ -239,11 +239,11 @@ describe('Ethereum wallet machine', () => {
         metamask.answers = false;
         metamask.announceOn(walletEvents);
 
-        const unreachable = await waitForNode(connection, 'unreachable');
-        expect(unreachable.data).toEqual(
+        const waitingToRetry = await waitForNode(connection, 'waitingToRetry');
+        expect(waitingToRetry.data).toEqual(
             expect.objectContaining({ failedChecks: 1 })
         );
-        await waitForNode(connection, 'unreachable');
+        await waitForNode(connection, 'waitingToRetry');
         metamask.answers = true;
         await waitForNode(connection, 'ready');
         close();
@@ -289,14 +289,14 @@ describe('Ethereum wallet machine', () => {
 
         metamask.answers = false;
         reportReadFailed();
-        await waitForNode(connection, 'unreachable');
+        await waitForNode(connection, 'waitingToRetry');
 
         metamask.answers = true;
         metamask.emit('connect', { chainId: toQuantity(EXPECTED_CHAIN_ID) });
         await waitForNode(connection, 'ready');
 
         metamask.emit('disconnect');
-        await waitForNode(connection, 'unreachable');
+        await waitForNode(connection, 'waitingToRetry');
         close();
     });
 
@@ -334,13 +334,13 @@ describe('Ethereum wallet machine', () => {
         close();
     });
 
-    test('a disconnect on the other chain, while asking to switch or after a declined switch, moves to unreachable', async () => {
+    test('a disconnect on the other chain, while asking to switch or after a declined switch, moves to waitingToRetry', async () => {
         const { connection, walletEvents, switchToExpectedChain, close } = startWallet(60_000);
         const metamask = new FakeWallet(walletInfo('MetaMask'));
         metamask.announceOn(walletEvents);
         await waitForNode(connection, 'wrongNetwork');
         metamask.emit('disconnect');
-        await waitForNode(connection, 'unreachable');
+        await waitForNode(connection, 'waitingToRetry');
 
         metamask.emit('connect', { chainId: toQuantity(OTHER_CHAIN_ID) });
         await waitForNode(connection, 'wrongNetwork');
@@ -348,7 +348,7 @@ describe('Ethereum wallet machine', () => {
         switchToExpectedChain();
         await waitForNode(connection, 'askingToSwitchChain');
         metamask.emit('disconnect');
-        await waitForNode(connection, 'unreachable');
+        await waitForNode(connection, 'waitingToRetry');
 
         metamask.emit('connect', { chainId: toQuantity(OTHER_CHAIN_ID) });
         await waitForNode(connection, 'wrongNetwork');
@@ -356,7 +356,7 @@ describe('Ethereum wallet machine', () => {
         switchToExpectedChain();
         await waitForNode(connection, 'switchDeclined');
         metamask.emit('disconnect');
-        await waitForNode(connection, 'unreachable');
+        await waitForNode(connection, 'waitingToRetry');
         close();
     });
 

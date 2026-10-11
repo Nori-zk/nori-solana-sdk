@@ -1,5 +1,7 @@
 import { define, type StateUnion } from '@yaw-rx/ystate';
-import { healthCheckedOf } from '../connection/httpConnection.js';
+import { backgroundCheckedEdges } from '../connection/backgroundChecked.js';
+import { connectionOf, wrongNetworkOf } from '../connection/connection.js';
+import { pacedOf } from '../connection/pacedConnection.js';
 
 /** A wallet the browser offers, as it announces itself (EIP-6963). */
 export interface WalletInfo {
@@ -15,7 +17,10 @@ export interface WalletInfo {
 
 const noWallet: WalletInfo = { uuid: '', name: '', icon: '', rdns: '' };
 
-const { nodes, edges } = healthCheckedOf({ wallet: noWallet });
+const { nodes, edges } = connectionOf({ wallet: noWallet });
+const wrongNetwork = wrongNetworkOf({ wallet: noWallet });
+const ready = { ...nodes.ready, health: { blockNumber: 0 } };
+const paced = pacedOf(ready);
 
 /**
  * The user's Ethereum wallet, when reads go through it (the app gave no
@@ -24,29 +29,31 @@ const { nodes, edges } = healthCheckedOf({ wallet: noWallet });
  * node that keeps reads from running carries what the app needs to tell
  * the user why, and none is a dead end.
  *
- * `checking`, `ready`, `wrongNetwork`, `unreachable`, `offline` and `closed`,
- * with their edges, are `healthCheckedOf`'s, each live node carrying the
- * wallet, so reads gate on the wallet exactly as on an HTTP connection. For
- * a wallet, `url` is its reverse-DNS id. Unlike an HTTP endpoint, a wallet
- * on another chain is not checked again on a timer: it waits for the user
- * to change chain.
+ * `connecting`, `ready`, `wrongNetwork`, `waitingToRetry`, `offline` and `closed`,
+ * with their edges, are `connectionOf`'s, each live node carrying the
+ * wallet, so reads gate on the wallet exactly as on an HTTP connection; the
+ * background check while `ready` is `backgroundCheckedEdges`; `overwhelmed`,
+ * with its edges, is `pacedOf`'s: every request through the
+ * wallet takes a turn from its grants. For a wallet, `url` is its
+ * reverse-DNS id. Unlike an HTTP endpoint, a wallet on another chain is not
+ * checked again on a timer: it waits for the user to change chain.
  *
  * - `lookingForWallets` asks wallets to announce themselves (EIP-6963
  *   `eip6963:requestProvider`), also accepting a legacy `window.ethereum`,
  *   for a short window. Its three outcome edges race on that one search.
  * - `noWalletFound`: there is no wallet to read through; the app can ask
  *   the user to install one. A wallet announcing itself later (installed or
- *   enabled) moves straight to `checking`.
+ *   enabled) moves straight to `connecting`.
  * - `choosingWallet`: several wallets are installed. The app lists them
  *   and calls `chooseWallet(uuid)`; wallets announcing themselves meanwhile
  *   join the list. With one wallet there is no choice to make.
- * - `checking` asks the wallet for its chain (`eth_chainId`), then its
+ * - `connecting` asks the wallet for its chain (`eth_chainId`), then its
  *   latest block (`eth_blockNumber`). A wallet that does not answer goes to
- *   `unreachable`, which asks again after a wait that doubles with each
+ *   `waitingToRetry`, which asks again after a wait that doubles with each
  *   consecutive failure (`failedChecks`, reset by an answer).
  * - `ready` runs a background check every interval; a passing one is the
  *   `stillReady` self-loop, carrying the latest block. A read that fails
- *   through the wallet sends `readFailed`: `ready` to `checking` at once.
+ *   through the wallet sends `readFailed`: `ready` to `connecting` at once.
  * - `wrongNetwork`: the wallet is on another chain. The app can tell the
  *   user which chain to switch to, and may ask the wallet to switch, once:
  *   `switchToExpectedChain` moves to `askingToSwitchChain`, whose `$` sends
@@ -57,12 +64,12 @@ const { nodes, edges } = healthCheckedOf({ wallet: noWallet });
  *   request the wallet fails for any other reason, or leaves unanswered for
  *   `switchTimeoutMs`, goes back to `wrongNetwork` with the reason in
  *   `lastSwitchError`, and the app may ask again.
- * - Any chain change, from any node with a wallet, checks again.
+ * - Any chain change, from any node with a wallet, connects again.
  * - The wallet's `disconnect` (it can reach no chain) moves to
- *   `unreachable` from every node with a wallet; its `connect` checks again
- *   at once.
- * - Going offline pauses everything in `offline`; coming back online checks
- *   at once.
+ *   `waitingToRetry` from every node with a wallet; its `connect` connects
+ *   again at once.
+ * - Going offline pauses everything in `offline`; coming back online
+ *   connects at once.
  * - `closed` ends the machine from any node and completes its streams.
  */
 export const EthereumWalletGraph = define({
@@ -71,16 +78,20 @@ export const EthereumWalletGraph = define({
         noWalletFound: {},
         choosingWallet: { wallets: [] as WalletInfo[] },
         ...nodes,
-        ready: { ...nodes.ready, health: { blockNumber: 0 } },
-        wrongNetwork: { ...nodes.wrongNetwork, lastSwitchError: '' },
-        askingToSwitchChain: { ...nodes.wrongNetwork },
-        switchDeclined: { ...nodes.wrongNetwork },
+        ready,
+        ...paced.nodes,
+        wrongNetwork: { ...wrongNetwork.nodes.wrongNetwork, lastSwitchError: '' },
+        askingToSwitchChain: { ...wrongNetwork.nodes.wrongNetwork },
+        switchDeclined: { ...wrongNetwork.nodes.wrongNetwork },
     },
     edges: {
         ...edges,
+        ...wrongNetwork.edges,
+        ...backgroundCheckedEdges,
+        ...paced.edges,
         oneWalletFound: {
             from: 'lookingForWallets',
-            to: 'checking',
+            to: 'connecting',
             on: 'foundOneWallet.next',
         },
         severalWalletsFound: {
@@ -95,7 +106,7 @@ export const EthereumWalletGraph = define({
         },
         walletInstalled: {
             from: 'noWalletFound',
-            to: 'checking',
+            to: 'connecting',
             on: 'walletAnnounced.next',
         },
         anotherWalletAnnounced: {
@@ -105,38 +116,43 @@ export const EthereumWalletGraph = define({
         },
         walletChosen: {
             from: 'choosingWallet',
-            to: 'checking',
+            to: 'connecting',
             on: 'chooseWallet.next',
         },
 
-        chainChangedWhileChecking: {
-            from: 'checking',
-            to: 'checking',
+        chainChangedWhileConnecting: {
+            from: 'connecting',
+            to: 'connecting',
             on: 'walletChangedChain.next',
         },
-        chainChangedWhileUnreachable: {
-            from: 'unreachable',
-            to: 'checking',
+        chainChangedWhileWaitingToRetry: {
+            from: 'waitingToRetry',
+            to: 'connecting',
             on: 'walletChangedChain.next',
         },
         chainChangedWhileReady: {
             from: 'ready',
-            to: 'checking',
+            to: 'connecting',
+            on: 'walletChangedChain.next',
+        },
+        chainChangedWhileOverwhelmed: {
+            from: 'overwhelmed',
+            to: 'connecting',
             on: 'walletChangedChain.next',
         },
         chainChangedOnWrongNetwork: {
             from: 'wrongNetwork',
-            to: 'checking',
+            to: 'connecting',
             on: 'walletChangedChain.next',
         },
         switchAccepted: {
             from: 'askingToSwitchChain',
-            to: 'checking',
+            to: 'connecting',
             on: 'walletChangedChain.next',
         },
         chainChangedAfterDecline: {
             from: 'switchDeclined',
-            to: 'checking',
+            to: 'connecting',
             on: 'walletChangedChain.next',
         },
 
@@ -161,29 +177,34 @@ export const EthereumWalletGraph = define({
             on: 'switchTimedOut.next',
         },
 
-        disconnectedWhileChecking: {
-            from: 'checking',
-            to: 'unreachable',
+        disconnectedWhileConnecting: {
+            from: 'connecting',
+            to: 'waitingToRetry',
             on: 'walletDisconnected.next',
         },
         disconnectedWhileReady: {
             from: 'ready',
-            to: 'unreachable',
+            to: 'waitingToRetry',
+            on: 'walletDisconnected.next',
+        },
+        disconnectedWhileOverwhelmed: {
+            from: 'overwhelmed',
+            to: 'waitingToRetry',
             on: 'walletDisconnected.next',
         },
         disconnectedOnWrongNetwork: {
             from: 'wrongNetwork',
-            to: 'unreachable',
+            to: 'waitingToRetry',
             on: 'walletDisconnected.next',
         },
         disconnectedWhileAskingToSwitchChain: {
             from: 'askingToSwitchChain',
-            to: 'unreachable',
+            to: 'waitingToRetry',
             on: 'walletDisconnected.next',
         },
         disconnectedAfterSwitchDeclined: {
             from: 'switchDeclined',
-            to: 'unreachable',
+            to: 'waitingToRetry',
             on: 'walletDisconnected.next',
         },
 
@@ -198,8 +219,8 @@ export const EthereumWalletGraph = define({
             on: 'networkWentOffline.next',
         },
         reconnected: {
-            from: 'unreachable',
-            to: 'checking',
+            from: 'waitingToRetry',
+            to: 'connecting',
             on: 'walletConnected.next',
         },
 

@@ -54,15 +54,22 @@ export function createSolanaWalletTransactionMachine(
         backoff: options.backoff,
         // The instructions it is made for are its initial state.
         start: { node: 'ready', data: { instructions: instructionsToSendOf(instructions) } },
-        ownTransitions: (read$, state$) => {
-            // One request to the wallet per entry into `askingToSign`.
+        ownTransitions: (read$, state$, started$) => {
+            // One request to the wallet per entry into `askingToSign`, on this machine's turns.
             const taking = requestOutcomes(
                 state$,
                 'askingToSign',
                 ({ instructions }: ResolveNodeData<typeof SolanaWalletTransactionGraph.nodes, 'askingToSign'>): Observable<SendOutcome> =>
-                    connections.solana.wallet.ready$().pipe(
+                    started$.pipe(
                         take(1),
-                        switchMap((signer) => sendSolanaTransaction$(connections.solana, signer, instructions, errorNames)),
+                        switchMap((machine) =>
+                            connections.solana.wallet.ready$(machine).pipe(
+                                take(1),
+                                switchMap((signer) =>
+                                    sendSolanaTransaction$(connections.solana, machine, signer, instructions, errorNames)
+                                )
+                            )
+                        ),
                         map((result): SendOutcome => {
                             if (result.outcome === 'sent') return { transition: 'sent', data: result.sent };
                             if (result.outcome === 'declined') return { transition: 'declined', data: { instructions } };

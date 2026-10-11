@@ -13,6 +13,9 @@ export type Eip1193EventProvider = Eip1193Provider & {
     ): unknown;
 };
 
+/** A wallet provider's events alone: what follows the wallet without making a request. */
+export type Eip1193Events = Pick<Eip1193EventProvider, 'on' | 'removeListener'>;
+
 /** The EIP-1193 error code for a request the user rejected. */
 export const USER_REJECTED_REQUEST = 4001;
 
@@ -25,7 +28,7 @@ export const USER_REJECTED_REQUEST = 4001;
  * @returns Each event's first argument, as it arrives.
  */
 export function eip1193Event$(
-    provider: Eip1193EventProvider,
+    provider: Eip1193Events,
     event: 'chainChanged' | 'connect' | 'disconnect' | 'accountsChanged'
 ): Observable<unknown> {
     return new Observable<unknown>((subscriber) => {

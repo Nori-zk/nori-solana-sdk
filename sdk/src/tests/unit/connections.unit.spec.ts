@@ -1,5 +1,5 @@
 import { type Address } from '@solana/kit';
-import { BehaviorSubject, defer, firstValueFrom, Observable, of, Subject, throwError } from 'rxjs';
+import { BehaviorSubject, defer, firstValueFrom, NEVER, Observable, of, Subject, throwError } from 'rxjs';
 import { type ChainChangesState } from '../../rpc/connection/chainChanges.js';
 import { type ChainChanges, createChainChangesMachine } from '../../rpc/connection/chainChanges.impl.js';
 import { ConnectionNotReadyError } from '../../rpc/connection/connectionNotReady.js';
@@ -12,12 +12,13 @@ import {
     solanaChain,
     type SolanaTransports,
 } from '../../rpc/connection/connections.js';
+import { type SubscriptionEvent } from '../../rpc/connection/jsonRpcTopic.js';
 import { MAX_BLOCK_RANGE_PER_QUERY } from '../../rpc/eth/blockRanges.js';
 import { EthRpcTransportError, NoWalletConfiguredError } from '../../rpc/eth/errors.js';
 import { SolanaRpcTransportError } from '../../rpc/solana/errors.js';
 import { createSolanaChangesMachine } from '../../rpc/solana/solanaChanges.impl.js';
 import { type SolanaRpc } from '../../rpc/solana/solanaHttp.js';
-import { QUEUE_ADDRESS, statesDuring, waitForNode, waitForState } from '../testUtils.js';
+import { QUEUE_ADDRESS, statesDuring, testSubscriber, waitForNode, waitForState } from '../testUtils.js';
 import { type GraphState } from '../../utils/machines.js';
 
 /** A transport whose machine's node the test sets, standing in for a real one. */
@@ -31,6 +32,7 @@ function fakeTransport(name: string, node: string) {
         transport: {
             connection: { state$ },
             current: () => ({ name }),
+            load$: NEVER,
             reportReadFailed: () => {
                 reported.count++;
             },
@@ -40,29 +42,29 @@ function fakeTransport(name: string, node: string) {
 }
 
 /**
- * A websocket transport whose socket subscribes through `subscribe$`;
- * `acknowledge()` answers the last subscribe request as a node does, with
- * the subscription's id.
+ * A websocket transport whose client subscribes through `events$`, standing
+ * in for the client over a real socket; `acknowledge()` answers the last
+ * subscribe as a node does, and `push()` sends a notification.
  */
-function fakeWebsocket(node: string, subscribe$: Subject<unknown>) {
+function fakeWebsocket(node: string, events$: Subject<SubscriptionEvent<unknown>>) {
     const fake = fakeTransport('websocket', node);
-    const requests = { lastId: 0, lastMethod: '', lastParams: [] as unknown[] };
-    const socket = {
-        multiplex: (subscribeMessage: () => { id: number; method: string; params: unknown[] }) =>
-            new Observable((subscriber) => {
-                const message = subscribeMessage();
-                requests.lastId = message.id;
-                requests.lastMethod = message.method;
-                requests.lastParams = message.params;
-                const subscription = subscribe$.subscribe(subscriber);
-                return () => subscription.unsubscribe();
-            }),
-        forceReconnect: () => {
-            fake.reported.count++;
-        },
+    const requests = { lastMethod: '', lastParams: [] as unknown[] };
+    const subscription$ = (method: string, params: unknown[]) =>
+        new Observable<SubscriptionEvent<unknown>>((subscriber) => {
+            requests.lastMethod = method;
+            requests.lastParams = params;
+            return events$.subscribe(subscriber);
+        });
+    const client = { request$: () => NEVER, subscription$, topic$: () => NEVER };
+    const acknowledge = () => events$.next({ kind: 'acknowledged' });
+    const push = () => events$.next({ kind: 'notification', result: {} });
+    return {
+        ...fake,
+        transport: { ...fake.transport, socket: {}, clientOf: () => client },
+        acknowledge,
+        push,
+        requests,
     };
-    const acknowledge = () => subscribe$.next({ id: requests.lastId, result: '0x1' });
-    return { ...fake, transport: { ...fake.transport, socket }, acknowledge, requests };
 }
 
 const chainOf = (transports: Record<string, unknown>, order: Parameters<typeof ethereumChain>[1]) =>
@@ -76,6 +78,8 @@ const stateWhere = (machine: ChainChanges, matches: (state: ChainChangesState) =
     waitForState(machine, matches, 1_000);
 
 describe('forCalls$ and forLogs$', () => {
+    const subscriber = testSubscriber();
+
     test('run on the first ready transport in the caller order', async () => {
         const http = fakeTransport('http', 'ready');
         const wallet = fakeTransport('wallet', 'ready');
@@ -84,18 +88,28 @@ describe('forCalls$ and forLogs$', () => {
             { calls: ['wallet', 'http'], logs: ['http', 'wallet'] }
         );
         const used = (provider: unknown) => of(nameOf(provider));
-        expect(await firstValueFrom(forCalls$(ethereum, used))).toBe('wallet');
-        expect(await firstValueFrom(forLogs$(ethereum, used))).toBe('http');
+        expect(await firstValueFrom(forCalls$(ethereum, subscriber, used))).toBe('wallet');
+        expect(await firstValueFrom(forLogs$(ethereum, subscriber, used))).toBe('http');
+    });
+
+    test('run on a transport that is overwhelmed: it still serves, at the rate its grants allow', async () => {
+        const http = fakeTransport('http', 'overwhelmed');
+        const ethereum = chainOf({ http: http.transport }, { calls: ['http'] });
+        expect(await firstValueFrom(forCalls$(ethereum, subscriber, (provider) => of(nameOf(provider))))).toBe(
+            'http'
+        );
     });
 
     test('skip a transport that is not ready', async () => {
-        const http = fakeTransport('http', 'unreachable');
+        const http = fakeTransport('http', 'waitingToRetry');
         const wallet = fakeTransport('wallet', 'ready');
         const ethereum = chainOf(
             { http: http.transport, wallet: wallet.transport },
             { calls: ['http', 'wallet'], logs: ['http'] }
         );
-        expect(await firstValueFrom(forCalls$(ethereum, (provider) => of(nameOf(provider))))).toBe('wallet');
+        expect(await firstValueFrom(forCalls$(ethereum, subscriber, (provider) => of(nameOf(provider))))).toBe(
+            'wallet'
+        );
     });
 
     test('a request that never reached the node tells that transport and runs again on the next', async () => {
@@ -107,7 +121,7 @@ describe('forCalls$ and forLogs$', () => {
         );
         const runs: string[] = [];
         const result = await firstValueFrom(
-            forCalls$(ethereum, (provider) =>
+            forCalls$(ethereum, subscriber, (provider) =>
                 defer(() => {
                     const name = nameOf(provider);
                     runs.push(name);
@@ -133,7 +147,7 @@ describe('forCalls$ and forLogs$', () => {
         let runs = 0;
         await expect(
             firstValueFrom(
-                forCalls$(ethereum, () =>
+                forCalls$(ethereum, subscriber, () =>
                     defer(() => {
                         runs++;
                         return throwError(() => new Error('execution reverted'));
@@ -146,14 +160,14 @@ describe('forCalls$ and forLogs$', () => {
     });
 
     test('with nothing ready, fail at once with every transport state', async () => {
-        const http = fakeTransport('http', 'unreachable');
+        const http = fakeTransport('http', 'waitingToRetry');
         const ethereum = chainOf({ http: http.transport }, { calls: ['http', 'wallet'] });
-        const failure = await firstValueFrom(forCalls$(ethereum, () => of('never'))).catch(
+        const failure = await firstValueFrom(forCalls$(ethereum, subscriber, () => of('never'))).catch(
             (error: unknown) => error
         );
         expect(failure).toBeInstanceOf(ConnectionNotReadyError);
         expect((failure as ConnectionNotReadyError).notReady).toEqual([
-            { transport: 'ethereum.http', state: { node: 'unreachable', data: {} } },
+            { transport: 'ethereum.http', state: { node: 'waitingToRetry', data: {} } },
         ]);
     });
 
@@ -167,7 +181,9 @@ describe('forCalls$ and forLogs$', () => {
 
     test('the wallet ready$() errors with its own error when no wallet is configured', async () => {
         const ethereum = chainOf({}, {});
-        await expect(firstValueFrom(ethereum.wallet.ready$())).rejects.toBeInstanceOf(NoWalletConfiguredError);
+        await expect(firstValueFrom(ethereum.wallet.ready$(subscriber))).rejects.toBeInstanceOf(
+            NoWalletConfiguredError
+        );
     });
 });
 
@@ -185,25 +201,24 @@ describe('the chain changes machine', () => {
         return { ...http.transport, current: () => provider };
     };
 
-    test('subscribes while the websocket is open, polls while it is not, subscribes again when it reopens', async () => {
-        const pushed$ = new Subject<unknown>();
-        const websocket = fakeWebsocket('open', pushed$);
+    test('subscribes while the websocket serves, polls while it does not, subscribes again when it serves again', async () => {
+        const events$ = new Subject<SubscriptionEvent<unknown>>();
+        const websocket = fakeWebsocket('ready', events$);
         const head = { number: 100 };
         const ethereum = chainOf(
             { http: fakeHttp(head, { found: [], reads: 0 }), websocket: websocket.transport },
             { calls: ['http'], logs: ['http'], subscriptions: ['websocket'] }
         );
         const changes = createChainChangesMachine(ethereum);
-        const push = () => pushed$.next({ params: { subscription: 1, result: {} } });
 
         await stateWhere(changes, (state) => state.node === 'subscribed' && !state.data.acknowledged);
         websocket.acknowledge();
         await stateWhere(changes, (state) => state.node === 'subscribed' && state.data.acknowledged);
-        push();
+        websocket.push();
         await stateWhere(changes, (state) => state.node === 'subscribed' && state.data.changes === 1);
 
         // Losing the websocket is a change; the first poll only reads the latest block.
-        websocket.state$.next({ node: 'reconnecting', data: {} });
+        websocket.state$.next({ node: 'waitingToRetry', data: {} });
         await stateWhere(
             changes,
             (state) => state.node === 'polling' && state.data.changes === 2 && state.data.lastPolled === 100
@@ -215,9 +230,9 @@ describe('the chain changes machine', () => {
         );
 
         // Subscribing again after polling is a change.
-        websocket.state$.next({ node: 'open', data: {} });
+        websocket.state$.next({ node: 'ready', data: {} });
         await stateWhere(changes, (state) => state.node === 'subscribed' && state.data.changes === 4);
-        push();
+        websocket.push();
         await stateWhere(changes, (state) => state.node === 'subscribed' && state.data.changes === 5);
 
         changes.close();
@@ -310,10 +325,15 @@ function fakeSolanaRpc(chain: { slot: number; watchedSlot?: number; failNext: bo
     } as unknown as SolanaRpc;
 }
 
-/** A Solana chain over a fake http (`node`) serving `rpc`, and a websocket subscribing through `pushed$`. */
-function solanaOf(node: string, rpc: SolanaRpc, websocketNode = 'closed', pushed$ = new Subject<unknown>()) {
+/** A Solana chain over a fake http (`node`) serving `rpc`, and a websocket subscribing through `events$`. */
+function solanaOf(
+    node: string,
+    rpc: SolanaRpc,
+    websocketNode = 'closed',
+    events$ = new Subject<SubscriptionEvent<unknown>>()
+) {
     const http = fakeTransport('http', node);
-    const websocket = fakeWebsocket(websocketNode, pushed$);
+    const websocket = fakeWebsocket(websocketNode, events$);
     const solana = solanaChain(
         {
             http: { ...http.transport, rpcOf: () => rpc },
@@ -325,32 +345,36 @@ function solanaOf(node: string, rpc: SolanaRpc, websocketNode = 'closed', pushed
 }
 
 describe('forSolana$', () => {
+    const subscriber = testSubscriber();
+
     test('runs on the RPC while http is ready, and errors with its state while it is not', async () => {
         const rpc = fakeSolanaRpc({ slot: 7, failNext: false });
         const { solana, http } = solanaOf('ready', rpc);
-        expect(await firstValueFrom(forSolana$(solana, (served) => of(served === rpc)))).toBe(true);
+        expect(await firstValueFrom(forSolana$(solana, subscriber, (served) => of(served === rpc)))).toBe(true);
 
-        http.state$.next({ node: 'unreachable', data: {} });
-        const failure = await firstValueFrom(forSolana$(solana, () => of('never'))).catch(
+        http.state$.next({ node: 'waitingToRetry', data: {} });
+        const failure = await firstValueFrom(forSolana$(solana, subscriber, () => of('never'))).catch(
             (error: unknown) => error
         );
         expect(failure).toBeInstanceOf(ConnectionNotReadyError);
         expect((failure as ConnectionNotReadyError).notReady).toEqual([
-            { transport: 'solana.http', state: { node: 'unreachable', data: {} } },
+            { transport: 'solana.http', state: { node: 'waitingToRetry', data: {} } },
         ]);
     });
 
     test('a request that got no response tells http and errors as unanswered; any other failure is thrown as is', async () => {
         const { solana, http } = solanaOf('ready', fakeSolanaRpc({ slot: 7, failNext: false }));
         const unanswered = await firstValueFrom(
-            forSolana$(solana, () => throwError(() => new SolanaRpcTransportError('no response', undefined)))
+            forSolana$(solana, subscriber, () =>
+                throwError(() => new SolanaRpcTransportError('no response', undefined))
+            )
         ).catch((error: unknown) => error);
         expect(unanswered).toBeInstanceOf(ConnectionNotReadyError);
         expect((unanswered as ConnectionNotReadyError).notReady[0].state.node).toBe('noResponse');
         expect(http.reported.count).toBe(1);
 
         await expect(
-            firstValueFrom(forSolana$(solana, () => throwError(() => new Error('account not found'))))
+            firstValueFrom(forSolana$(solana, subscriber, () => throwError(() => new Error('account not found'))))
         ).rejects.toThrow('account not found');
         expect(http.reported.count).toBe(1);
     });
@@ -397,10 +421,10 @@ describe('the Solana changes machine', () => {
         changes.close();
     });
 
-    test('subscribes for transactions mentioning the address while the websocket is open, and polls once it closes', async () => {
-        const pushed$ = new Subject<unknown>();
+    test('subscribes for transactions mentioning the address while the websocket serves, and polls once it stops', async () => {
+        const events$ = new Subject<SubscriptionEvent<unknown>>();
         const chain = { slot: 100, failNext: false };
-        const { solana, websocket } = solanaOf('ready', fakeSolanaRpc(chain), 'open', pushed$);
+        const { solana, websocket } = solanaOf('ready', fakeSolanaRpc(chain), 'ready', events$);
         const changes = createSolanaChangesMachine(solana, { mentions: WATCHED });
 
         await stateWhere(changes, (state) => state.node === 'subscribed' && !state.data.acknowledged);
@@ -408,10 +432,10 @@ describe('the Solana changes machine', () => {
         expect(websocket.requests.lastParams).toEqual([{ mentions: [WATCHED] }, { commitment: 'finalized' }]);
         websocket.acknowledge();
         await stateWhere(changes, (state) => state.node === 'subscribed' && state.data.acknowledged);
-        pushed$.next({ params: { subscription: 1, result: {} } });
+        websocket.push();
         await stateWhere(changes, (state) => state.node === 'subscribed' && state.data.changes === 1);
 
-        websocket.state$.next({ node: 'reconnecting', data: {} });
+        websocket.state$.next({ node: 'waitingToRetry', data: {} });
         await stateWhere(
             changes,
             (state) => state.node === 'polling' && state.data.changes === 2 && state.data.lastPolled === 100
@@ -421,7 +445,7 @@ describe('the Solana changes machine', () => {
 
     test('waits in polling while http cannot serve a read, and polls once it can', async () => {
         const chain = { slot: 100, failNext: false };
-        const { solana, http } = solanaOf('unreachable', fakeSolanaRpc(chain));
+        const { solana, http } = solanaOf('waitingToRetry', fakeSolanaRpc(chain));
         const changes = createSolanaChangesMachine(solana);
 
         const waiting = await statesDuring(changes, 100);

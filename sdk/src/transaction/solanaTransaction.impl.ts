@@ -1,4 +1,4 @@
-import { type ResolveNodeData } from '@yaw-rx/ystate';
+import { type ResolveNodeData, type RunningMachine } from '@yaw-rx/ystate';
 import {
     address,
     appendTransactionMessageInstructions,
@@ -275,6 +275,7 @@ export type SolanaSendResult =
  * `failed`.
  *
  * @param solana The Solana chain.
+ * @param subscriber The machine sending it, whose turns its requests take.
  * @param signer The signer that pays the fee and signs.
  * @param instructions The instructions.
  * @param errorNames The programs' custom error names.
@@ -282,6 +283,7 @@ export type SolanaSendResult =
  */
 export function sendSolanaTransaction$(
     solana: Solana,
+    subscriber: RunningMachine,
     signer: TransactionSigner,
     instructions: InstructionToSend[],
     errorNames: ProgramErrorNames
@@ -299,7 +301,7 @@ export function sendSolanaTransaction$(
                 failedReads: 0,
             },
         });
-    return forSolana$(solana, (rpc) =>
+    return forSolana$(solana, subscriber, (rpc) =>
         solanaRpcRead$(
             (abortSignal) => rpc.getLatestBlockhash({ commitment: 'confirmed' }).send({ abortSignal }),
             'Failed to read the latest blockhash.'
@@ -319,7 +321,7 @@ export function sendSolanaTransaction$(
                 );
             return defer(() => signTransactionMessageWithSigners(message)).pipe(
                 switchMap((transaction) =>
-                    forSolana$(solana, (rpc) =>
+                    forSolana$(solana, subscriber, (rpc) =>
                         solanaRpcRead$(
                             (abortSignal) =>
                                 rpc

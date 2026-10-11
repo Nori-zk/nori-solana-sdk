@@ -16,6 +16,7 @@ import {
     throwError,
 } from 'rxjs';
 import { type EthereumProvider } from '@nori-zk/ethereum-solana-bridge/iso-provider';
+import { type RunningMachine } from '@yaw-rx/ystate';
 import { type GraphState, type StartedMachine } from '../utils/machines.js';
 import { messageOf } from '../utils/messageOf.js';
 import {
@@ -114,28 +115,31 @@ const transportOf = (need: ChainTransportName) => need.split('.')[1] as RequestT
 
 /**
  * The runners a read goes through: Ethereum in its calls or logs order,
- * Solana through its RPC, and the Ethereum transport `needs` names. Without
- * one, `transport` errors with `ConnectionNotReadyError`.
+ * Solana through its RPC, and the Ethereum transport `needs` names, every
+ * request on the subscriber's turns. Without one, `transport` errors with
+ * `ConnectionNotReadyError`.
  *
  * @param connections The two chains.
+ * @param subscriber The machine the reads are for.
  * @param kind Whether Ethereum's calls or logs order applies.
  * @param needs What the read needs.
  * @returns The runner per chain, and the transport's.
  */
 export function connectedReadClientsOf(
     connections: ProofRequestConnections,
+    subscriber: RunningMachine,
     kind: 'calls' | 'logs' = 'calls',
     needs: ReadNeed[] = BOTH_CHAINS
 ): ConnectedReadClients {
     const through = kind === 'logs' ? forLogs$ : forCalls$;
     const transportNeed = needs.find(isTransportNeed);
     return {
-        ethereum: (read) => through(connections.ethereum, read),
-        solana: (read) => forSolana$(connections.solana, read),
+        ethereum: (read) => through(connections.ethereum, subscriber, read),
+        solana: (read) => forSolana$(connections.solana, subscriber, read),
         transport: (read) =>
             transportNeed === undefined
                 ? throwError(() => new ConnectionNotReadyError([]))
-                : forTransport$(connections.ethereum, transportOf(transportNeed), read),
+                : forTransport$(connections.ethereum, transportOf(transportNeed), subscriber, read),
     };
 }
 
@@ -146,31 +150,31 @@ export function connectedReadClientsOf(
  *
  * @param connections The two chains.
  * @param need What the read needs.
- * @param whileChecking Count a transport re-checking itself as usable.
+ * @param whileConnecting Count a transport re-checking itself as usable.
  * @returns `true` while it can.
  */
-function needUsable$(connections: ProofRequestConnections, need: ReadNeed, whileChecking: boolean) {
-    if (need === 'ethereum') return ethereumCallsUsable$(connections.ethereum, whileChecking);
-    if (need === 'solana') return solanaCallsUsable$(connections.solana, whileChecking);
+function needUsable$(connections: ProofRequestConnections, need: ReadNeed, whileConnecting: boolean) {
+    if (need === 'ethereum') return ethereumCallsUsable$(connections.ethereum, whileConnecting);
+    if (need === 'solana') return solanaCallsUsable$(connections.solana, whileConnecting);
     if (need === 'solana.wallet') return solanaWalletUsable$(connections.solana);
-    return transportUsable$(connections.ethereum, transportOf(need), whileChecking);
+    return transportUsable$(connections.ethereum, transportOf(need), whileConnecting);
 }
 
 /**
  * The needs that cannot serve a read, each time one changes.
  *
  * @param connections The two chains.
- * @param whileChecking Count a transport re-checking itself as able: what a
+ * @param whileConnecting Count a transport re-checking itself as able: what a
  *   failed request did is decided once its check settles.
  * @param needs What the read needs.
  * @returns The needs that cannot serve a read, in the order of `needs`.
  */
 function notReady$(
     connections: ProofRequestConnections,
-    whileChecking = false,
+    whileConnecting = false,
     needs: ReadNeed[] = BOTH_CHAINS
 ): Observable<ReadNeed[]> {
-    return combineLatest(needs.map((need) => needUsable$(connections, need, whileChecking))).pipe(
+    return combineLatest(needs.map((need) => needUsable$(connections, need, whileConnecting))).pipe(
         map((usable) => needs.filter((_need, i) => !usable[i]))
     );
 }
@@ -282,7 +286,7 @@ function outcomeAfterRecheck$(
         .filter((machine): machine is NonNullable<typeof machine> => machine !== undefined)
         .map((machine) =>
             machine.state$.pipe(
-                filter(({ node }) => node !== 'checking'),
+                filter(({ node }) => node !== 'connecting'),
                 take(1)
             )
         );
@@ -330,6 +334,7 @@ const needOf = (transport: TransportName, needs: ReadNeed[]): ReadNeed =>
  * `transport`.
  *
  * @param connections The two chains.
+ * @param subscriber The machine the read is for, whose turns its requests take.
  * @param read The read, given the runners.
  * @param kind Whether Ethereum's calls or logs order applies.
  * @param needs What the read needs (default: both chains).
@@ -337,6 +342,7 @@ const needOf = (transport: TransportName, needs: ReadNeed[]): ReadNeed =>
  */
 export function readThroughConnections$<T>(
     connections: ProofRequestConnections,
+    subscriber: RunningMachine,
     read: (clients: ConnectedReadClients) => Observable<T>,
     kind: 'calls' | 'logs' = 'calls',
     needs: ReadNeed[] = BOTH_CHAINS
@@ -354,7 +360,7 @@ export function readThroughConnections$<T>(
             })),
             takeUntil(readSettled$)
         );
-        const result$ = defer(() => read(connectedReadClientsOf(connections, kind, needs))).pipe(
+        const result$ = defer(() => read(connectedReadClientsOf(connections, subscriber, kind, needs))).pipe(
             take(1),
             map((value) => ({ outcome: 'succeeded' as const, value })),
             catchError((error: unknown) => {

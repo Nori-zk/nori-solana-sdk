@@ -14,9 +14,11 @@ import {
     startWith,
     Subject,
     switchMap,
+    take,
     throwError,
     timer,
 } from 'rxjs';
+import { type RunningMachine } from '@yaw-rx/ystate';
 import { dataOnEntry$, heldAcrossMoves, stateOf$, stateOnEntry$, type StartedMachine } from '../../utils/machines.js';
 import { messageOf } from '../../utils/messageOf.js';
 import { MAX_BLOCK_RANGE_PER_QUERY } from '../eth/blockRanges.js';
@@ -50,14 +52,19 @@ export type Poll = {
 export interface ChainChangesOptions<TTransport extends SubscriptionTransport> {
     /** The transports in the chain's subscriptions order that are usable, in that order, as it changes. */
     subscribable$: Observable<TTransport[]>;
-    /** The subscription on each transport: the node's acknowledgement, then each push. */
-    pushesOn: Record<TTransport, Observable<SubscriptionEvent<unknown>>>;
     /**
-     * One poll from `lastPolled`: the latest block or slot, and whether the
-     * chain changed since; `undefined` when none arrived. The first poll,
-     * with no `lastPolled`, only reads the latest one.
+     * The subscription on each transport: the node's acknowledgement, then
+     * each push; given the running machine, once started, whose turns its
+     * requests take.
      */
-    poll$: (lastPolled: number | undefined) => Observable<Poll | undefined>;
+    pushesOn: (started$: Observable<RunningMachine>) => Record<TTransport, Observable<SubscriptionEvent<unknown>>>;
+    /**
+     * One poll from `lastPolled`, its requests on the machine's turns: the
+     * latest block or slot, and whether the chain changed since; `undefined`
+     * when none arrived. The first poll, with no `lastPolled`, only reads the
+     * latest one.
+     */
+    poll$: (lastPolled: number | undefined, machine: RunningMachine) => Observable<Poll | undefined>;
     /** Whether the chain can serve a poll, as it changes. */
     callsUsable$: Observable<boolean>;
     /** How often it polls while no transport can subscribe. */
@@ -92,7 +99,9 @@ export function startChainChangesMachine<TTransport extends SubscriptionTranspor
 }: ChainChangesOptions<TTransport>) {
     const close$ = new Subject<void>();
     const started$ = new ReplaySubject<StartedMachine<ChainChangesState>>(1);
+    const running$ = new ReplaySubject<RunningMachine>(1);
     const state$ = stateOf$(started$);
+    const subscriptions = pushesOn(running$);
 
     /**
      * The transport to subscribe on: the first usable one not in
@@ -125,7 +134,7 @@ export function startChainChangesMachine<TTransport extends SubscriptionTranspor
                 dataOnEntry$(state$, 'subscribed').pipe(
                     // A state's data holds the transport's name as a string: one `subscribable$` gave.
                     switchMap(({ transport }) =>
-                        pushesOn[transport as TTransport].pipe(
+                        subscriptions[transport as TTransport].pipe(
                             // Only a refusal is an error; a subscription ending any other way is lost.
                             catchError((error: unknown) =>
                                 error instanceof SubscriptionRefusedError ? throwError(() => error) : EMPTY
@@ -197,7 +206,12 @@ export function startChainChangesMachine<TTransport extends SubscriptionTranspor
                                           ? timer(pollIntervalMs, pollIntervalMs).pipe(startWith(0))
                                           : timer(pollIntervalMs, pollIntervalMs)
                                       ).pipe(
-                                          exhaustMap(() => poll$(lastPolled)),
+                                          exhaustMap(() =>
+                                              running$.pipe(
+                                                  take(1),
+                                                  switchMap((machine) => poll$(lastPolled, machine))
+                                              )
+                                          ),
                                           filter((poll): poll is Poll => poll !== undefined)
                                       )
                             )
@@ -228,6 +242,7 @@ export function startChainChangesMachine<TTransport extends SubscriptionTranspor
 
     const running = machine.close().start('polling');
     started$.next(running);
+    running$.next(running);
 
     return Object.assign(running, { close: () => close$.next() });
 }
@@ -248,19 +263,29 @@ export function createChainChangesMachine(chain: Ethereum, logsFilter?: Ethereum
     return startChainChangesMachine({
         subscribable$,
         // One subscription per transport, kept while a push loops back to `subscribed`.
-        pushesOn: {
-            websocket: ethSubscribe$('websocket', params).pipe(heldAcrossMoves()),
-            wallet: ethSubscribe$('wallet', params).pipe(heldAcrossMoves()),
-        },
+        pushesOn: (started$) => ({
+            websocket: started$
+                .pipe(
+                    take(1),
+                    switchMap((machine) => ethSubscribe$('websocket', params, machine))
+                )
+                .pipe(heldAcrossMoves()),
+            wallet: started$
+                .pipe(
+                    take(1),
+                    switchMap((machine) => ethSubscribe$('wallet', params, machine))
+                )
+                .pipe(heldAcrossMoves()),
+        }),
         // A gap longer than one log query counts as one change.
-        poll$: (lastBlock) =>
-            forCalls$(chain, (provider) => blockNumber$(provider, 'latest')).pipe(
+        poll$: (lastBlock, machine) =>
+            forCalls$(chain, machine, (provider) => blockNumber$(provider, 'latest')).pipe(
                 switchMap((latest) => {
                     if (lastBlock === undefined) return of({ lastPolled: latest, changed: false });
                     if (latest <= lastBlock) return of(undefined);
                     if (logsFilter === undefined || latest - lastBlock > MAX_BLOCK_RANGE_PER_QUERY)
                         return of({ lastPolled: latest, changed: true });
-                    return forLogs$(chain, (provider) =>
+                    return forLogs$(chain, machine, (provider) =>
                         ethRpcRead$(
                             () => provider.getLogs({ ...logsFilter, fromBlock: lastBlock + 1, toBlock: latest }),
                             `Log query over blocks ${lastBlock + 1}-${latest} failed.`

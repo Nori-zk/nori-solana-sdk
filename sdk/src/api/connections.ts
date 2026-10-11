@@ -55,26 +55,21 @@ export { ChainChangesGraph, type ChainChangesState } from '../rpc/connection/cha
 export { changesOf$, createChainChangesMachine, type ChainChanges } from '../rpc/connection/chainChanges.impl.js';
 export { createSolanaChangesMachine } from '../rpc/solana/solanaChanges.impl.js';
 
-// Each connection's status: one machine per connection over its transports.
-export { ConnectionStatusGraph, type ConnectionStatusState } from '../rpc/connection/connectionStatus.js';
-export {
-    createConnectionStatusMachine,
-    httpStatus,
-    networkStatus,
-    walletStatus,
-    websocketStatus,
-    type LiveConnectionStatus,
-    type StatusTransport,
-} from '../rpc/connection/connectionStatus.impl.js';
 
 // The machines' graphs and states, for showing and gating on each transport.
 export { NetworkGraph, type NetworkState } from '../rpc/connection/network.js';
 export { DEFAULT_CONNECTIVITY_PROBE_URLS, type NetworkOptions } from '../rpc/connection/network.impl.js';
 export { HttpConnectionGraph, type HttpConnectionState } from '../rpc/connection/httpConnection.js';
 export {
+    RateLimitedWebSocketGraph,
+    type RateLimitedWebSocketState,
+    RateLimitedWebSocketWithWrongNetworkGraph,
+    type RateLimitedWebSocketWithWrongNetworkState,
     WebSocketConnectionGraph,
     type WebSocketConnectionState,
 } from '../rpc/connection/websocketConnection.js';
+// Each second's count of the requests through a transport's grants (`load$`), and the rate after it.
+export { type ConnectionLoad } from '../rpc/connection/connectionGrants.js';
 export {
     EthereumWalletGraph,
     type EthereumWalletState,

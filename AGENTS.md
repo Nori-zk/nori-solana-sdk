@@ -54,9 +54,9 @@ cargo fmt --all --check                  # clean
 
 npm run build -w sdk              # its prebuild regenerates sdk/src/program/ from idl/
 npm run lint -w sdk               # clean
-npm run test:unit -w sdk          # 118 passing
+npm run test:unit -w sdk          # 143 passing
 surfpool start --offline --no-deploy --ci &   # then, with target/deploy/token.so built:
-npm run test:integration -w sdk   # 12 passing against the running surfpool; no reset between runs
+npm run test:integration -w sdk   # 13 passing against the running surfpool; no reset between runs
 ```
 
 ## Build quirks that cost hours
@@ -307,13 +307,37 @@ jk89 was sad the agents ignored his abstraction and worked around it
   as a hand-written union beside the graph.
 - A shape several graphs share is written once and spread:
   `readThroughConnectionsOf(data)` (a value read and kept current),
-  `healthCheckedOf(carried)` (a connection checked by its health; http and
-  the wallet), `ChainChangesGraph` (Ethereum's and Solana's changes, both
-  started by `startChainChangesMachine`). Their transitions are written once
-  too (`readThroughConnectionsTransitions`, `healthCheckedTransitions`), and
-  so is a pattern the machines repeat: one request per entry into a node,
-  shared by its outcome edges, is `requestOnEntry$`; outcomes split by a
-  field are `withOutcome`.
+  `connectionOf(carried)` (every connection: http, the wallet, the
+  websockets), `wrongNetworkOf` (a connection whose check can find another
+  network), `backgroundCheckedEdges` (a check every interval while ready:
+  http and the wallet), `pacedOf` (`overwhelmed`: a connection whose
+  requests go through grants), `ChainChangesGraph` (Ethereum's and Solana's
+  changes, both started by `startChainChangesMachine`). Their transitions are
+  written once too (`readThroughConnectionsTransitions`,
+  `connectionTransitions`, `wrongNetworkTransitions`,
+  `backgroundCheckedTransitions`, `pacedTransitions`), and so is a pattern
+  the machines repeat: one request per entry into a node, shared by its
+  outcome edges, is `requestOnEntry$`; outcomes split by a field are
+  `withOutcome`.
+- A shared shape holds one concern, and a graph spreads only the shapes
+  whose nodes it can reach. A node a machine can never enter is a dead end:
+  Nori's websocket cannot be asked which network it serves, so its graph
+  does not spread `wrongNetworkOf`; when one consumer needs only part of a
+  shape, split the shape rather than carry the rest.
+- Every request to an endpoint takes a turn from its connection's grants:
+  reads, refreshes, retries, polls, subscriptions, sends and health checks.
+  The only way to a transport's client is `clientOf(url, machine)` (or the
+  runners and `ready$(machine)`, which call it), so a request without its
+  machine does not compile. A transport fills the contract
+  (`GrantedTransport`): its client over the granted send, and what "too
+  many" looks like to its node, which differs per chain (`-32005` is a
+  limit on Ethereum and an unhealthy node on Solana).
+- Behaviour against an endpoint is tested against the real clients
+  (`@solana/kit`, ethers) in front of a local endpoint that misbehaves as a
+  real one does (`rateLimitedEndpoint.unit.spec.ts`, the socket server in
+  `websocketConnection.unit.spec.ts`), and against surfpool where a real
+  node's answer is the question. A fake shaped by an assumption proves only
+  the assumption.
 - `refreshOn` is followed from before each read: its first emission says it
   is following, each later one that a refresh is due. A chain trigger is
   `changesOf$` of an owned chain changes machine, following once it knows
